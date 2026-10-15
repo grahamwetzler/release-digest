@@ -1,0 +1,9 @@
+/bin/
+*.db
+*.db-*
+/out/
+compose.override.yaml
+/secrets/*
+!/secrets/.gitignore
+# roborev snapshots
+/.roborev/

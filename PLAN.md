@@ -68,7 +68,7 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 - **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback` (§3.3), so fallback publication never waits on the LLM. It does wait for a fresh public confirmation of the repo (§3.1, processing gate).
 - Render also runs after every 5 completed summaries, so a long summarize pass publishes as it goes.
 
-**Visibility first.** Every tick begins with a **visibility sweep** that checks *all* repos (§3.1 step 0) before any other work. Unchanged repos return 304s, which cost no rate limit, and the sweep runs 4 at a time. It isn't subject to the round-robin or the poll budget, so no repo goes unchecked in a tick. Its result is recorded as `visibility_confirmed_tick`.
+**Visibility first.** Every tick begins with a **visibility sweep** that checks *all* repos (§3.1 step 0) before any other work. Unchanged repos return 304s, which cost no rate limit. The sweep runs 8 at a time, with a 10s timeout per request and its own **`schedule.sweep_budget`** (default 2m). Any repo not confirmed when the budget runs out is **unverified** for this tick: the gate treats it like a failed check, and it's simply retried next tick. A few slow repos therefore delay only themselves, never the feed. The result is recorded as `visibility_confirmed_tick`.
 
 **Fairness:** after the sweep, repos' content is polled round-robin from a persisted cursor, so a pass cut short by the budget or a rate limit picks up where it stopped. Summaries are taken oldest `first_seen_at` first, at most `llm.max_per_pass` (default 20) per pass.
 
@@ -78,7 +78,14 @@ For each repo:
 
 0. **Public check, every poll, fail-closed.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` **before every poll** of that repo. When authenticated, an unchanged repo is a 304 and costs no rate limit. The repo is fetched only if this tick's response (or its validated 304) says `private: false`. If the response says `private: true`, or the check fails for any reason (error, timeout, rate limit), nothing else is fetched for that repo this tick.
    - On `private: true` **or a 404** (a repo that's gone private looks like a 404 to a token without access), the repo is marked **held** in `repo_state` and an error is logged. `config lint` fails on it. Holding is **not terminal**: rows keep their state, and nothing is moved to `skipped` or cancelled.
-   - **Processing gate (strict).** Any action that would newly expose a repo's content requires a **public confirmation from the current tick**: `visibility_confirmed_tick` equals the running tick's ID, so the repo passed this tick's visibility sweep. A confirmation from an earlier tick never counts. The outbox worker, which runs between ticks, goes further and does a **just-in-time check**: a conditional `GET /repos/{o}/{r}` immediately before each send, which must return `private: false`, or the alert waits. The gate covers:
+   - **Processing gate (strict).** Any action that would newly expose a repo's content has to pass two checks:
+
+1. **Tick confirmation.** `visibility_confirmed_tick` equals the running tick's ID, so the repo passed this tick's sweep. A confirmation from an earlier tick never counts.
+2. **Just-in-time check.** Immediately before each exposing action, a conditional `GET /repos/{o}/{r}` must return `private: false`. That means before each **LLM call**, before each render's **first publication** (one check per repo per render pass, covering the promotions made in that pass), and before each **ntfy send**.
+   - Unchanged repos return 304s, so this costs no rate limit.
+   - A just-in-time check that fails, returns 404 or says private **invalidates** the tick confirmation at once (`visibility_confirmed_tick = NULL`). If it says private or 404, it also holds the repo. Nothing else for that repo runs this tick.
+
+So the exposure window is the few seconds between a just-in-time check and the request right after it, not the length of a stage. The gate covers:
      - GitHub content fetches, notes resolution, LLM calls, advisory lookups, metadata and existence checks
      - new alert decisions
      - render-time `pending` → `fallback` **promotion** (first publication)
@@ -108,7 +115,7 @@ For each repo:
 
 **Where public-only is actually enforced.** The guarantee rests on the per-poll visibility check above, **not** on the token. GitHub reports `private: true` for a private repo whatever the token's permissions, so a private (or newly inaccessible) repo is held before any of its content is requested or exposed.
 
-The only residual exposure is a repo flipping to private in the seconds between its visibility check and its content requests within one poll. Content fetched in that window was public moments earlier. This is accepted and documented in the README.
+The only residual exposure is a repo flipping to private in the seconds between a just-in-time check and the request that follows it. Content fetched in that window was public moments earlier. This is accepted and documented in the README.
 
 **Token guard (best-effort, defense in depth).** GitHub provides no API that proves a token is public-only. For example, a fine-grained token scoped to "selected repositories" that happen to be public today looks identical to a public-only token. So the guard catches obvious misconfiguration and claims nothing more:
 
@@ -271,7 +278,13 @@ Truncation happens at a rune boundary with `…`. The links are in headers (`Cli
 
 - **Timing:** it wakes every 30s, or immediately when a row is enqueued, and sends at most 10 per wake, each with a 10s request timeout. Dispatch latency after a decision is normally a few seconds.
 - **Enqueued once per release.** Rows are keyed by GUID, so `resummarize`, restarts and state transitions never enqueue twice.
-- **De-escalation cancels unsent alerts.** When recomputed urgency drops below `urgent`, a `queued` row for that release becomes `cancelled` in the same transaction. If the release escalates again while still within `max_age`, that row returns to `queued`. A `sent` row is never touched: no retraction, and no second send.
+- **Claiming.** The worker **claims** a row by atomically moving it from `queued` to `sending` in its own transaction. Only then does it run the just-in-time visibility check. In a **second transaction** immediately before the POST, it re-reads the row and proceeds only if it's still `sending` and `cancel_requested = 0`.
+- **De-escalation cancels unsent alerts.** When recomputed urgency drops below `urgent`, the outcome depends on the row's state at that moment. It all happens in one transaction:
+  - A `queued` row becomes `cancelled`.
+  - A `sending` row gets `cancel_requested = 1`. If the worker hasn't passed its pre-POST re-read, it moves the row to `cancelled` and doesn't send. If the POST has already started, the alert goes out and the row ends `sent`. That's an accepted race with a window of one HTTP request, and it's logged.
+  - If the release escalates again within `max_age`, a `cancelled` row returns to `queued` and `cancel_requested` is cleared.
+  - A `sent` row is never touched: no retraction, and no second send.
+- **Crash safety.** A row left in `sending` after a crash or restart goes back to `queued` at startup, which is consistent with at-least-once.
 - **Delivery is at-least-once.** A row is marked `sent` only after a 2xx. If ntfy accepted the POST but the response was lost (timeout, connection reset, crash before the commit), the retry can deliver a **duplicate**. That's deliberate: for an urgent security alert, a rare duplicate beats a lost alert. The README documents it.
 - **Retries:** a failed or ambiguous delivery retries with backoff (1m → 1h cap) **until it succeeds or the release passes `notify.max_age`**. The next attempt is scheduled at `min(now + backoff, expiry − 2m)`, so a backoff step can never jump past the window: there's always a final attempt just before expiry. Then it's marked `expired`, logged at error level, and reported on `/healthz` as degraded until it's acknowledged with `release-digest notify ack`.
 - **Exact guarantee:** the alert is delivered, possibly more than once, **if any attempt inside the alert window succeeds** (`max_age`, default 7d, from the release's pubDate). Attempts run at least hourly throughout the window, plus one just before expiry, and they're also held while the repo lacks fresh public confirmation (§3.1). An ntfy outage that covers every attempt drops the alert, but never silently. A week-late "urgent" ping has little value, and the release is still marked in the feed.
@@ -327,6 +340,7 @@ feed:
 schedule:
   interval: 1h       # RELEASE_DIGEST_SCHEDULE_INTERVAL
   jitter: 5m
+  sweep_budget: 2m      # visibility sweep at tick start (§3)
   poll_budget: 7m       # per-stage deadlines; render always runs (§3)
   summarize_budget: 7m
 
@@ -602,7 +616,8 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   channel     TEXT NOT NULL,               -- ntfy
   reason      TEXT NOT NULL,               -- advisory:GHSA-… | llm
   payload     TEXT NOT NULL,
-  state       TEXT NOT NULL,               -- queued | sent | expired | cancelled
+  state       TEXT NOT NULL,               -- queued | sending | sent | expired | cancelled
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
   attempts    INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER,
   created_at  INTEGER NOT NULL,
@@ -648,6 +663,9 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - A release published while a repo's first scan is in flight is `origin = live` and alert-eligible, whether it's found by that scan or later by reconciliation.
   - Urgency is downgraded when the only `high` advisory becomes `medium` and the marking is removed. A later re-escalation doesn't re-send the alert.
   - A repo that turns private between ticks: the next tick's sweep holds it before any summarize or promotion, and the outbox's just-in-time check stops a queued alert mid-tick.
+  - A repo that turns private *after* the sweep: the just-in-time check before its LLM call fails, invalidates the tick confirmation, and nothing more is sent or promoted for it this tick.
+  - A sweep where 50 repos time out ends at `sweep_budget`. Those repos are unverified, and the feed still renders on time.
+  - Cancellation races: cancel while `queued` → no send; cancel after claim but before the pre-POST re-read → no send; cancel during the POST → sent once, logged. A row stuck in `sending` after a crash is re-queued at startup.
   - An advisory for an unrelated dependency, mentioned in the notes and raised to `critical`, never marks the release.
   - A withdrawal during an ntfy outage cancels the queued alert, and re-escalation re-queues it once.
   - A post-initialization release recovered by reconciliation alerts. A pre-initialization one doesn't.
@@ -686,7 +704,7 @@ Milestone 2 alone is already a useful aggregated releases feed, which makes it a
 - **Public repositories only** in v1. Enforcement is a fail-closed visibility check on every poll. The token guard is best-effort defense in depth, since GitHub can't prove a token is public-only (§3.1).
 - After the third and fourth roborev reviews: the token-guard claims are scoped honestly and re-checked on SIGHUP, `fallback` → `no_notes` is allowed and listed in §1, the deletion sweep orders by attempt time, and catch-up is **atomic** (buffered, committed only on completion, budget checked only between repos). That replaces the resumable-checkpoint design, which could stall or skip entries.
 - After the fifth roborev review: ntfy delivery is explicitly at-least-once from a separate outbox worker; advisories are matched to repos by `source_code_location` or configured `packages` and refreshed on a TTL; urgency is stored apart from summary state; alert bodies have a byte budget; every row records its discovery `origin`; daily reconciliation repairs pagination shifts during a scan; tag metadata and deletion checks run from bounded queues; and the ntfy secret moves to the compose override.
-- **Urgent security alerts via ntfy** (§3.4): a deterministic GHSA/CVE advisory signal plus a narrowly defined LLM signal, **enqueued once** per release and **delivered at least once within the alert window** (`max_age`), so a duplicate is possible after an ambiguous POST. Alerts are suppressed for backfill, old releases and pre-releases.
+- **Urgent security alerts via ntfy** (§3.4): a deterministic GHSA/CVE advisory signal plus a narrowly defined LLM signal, **enqueued once** per release. Delivery is **bounded and best-effort**: attempts run at least hourly through the alert window (`max_age`), with a final one just before expiry. The alert is delivered, possibly twice after an ambiguous POST, **if any attempt succeeds**. An outage that covers the whole window expires it loudly (error log plus `/healthz` degraded), never silently. Unsent alerts are cancelled on de-escalation. Alerts are suppressed for backfill, old releases and pre-releases.
 - After the second roborev review: published items are never hidden by state transitions, fallbacks have no age cutoff, deletion checks rotate across all published items, poll and summarize have separate budgets, and `content_updated_at` drives Atom `<updated>`.
 - After the first roborev review: the summary cache is keyed on the full canonical request, there's an explicit release state machine with fallback retries, deletions need a confirmed 404, tag pre-releases and predecessors are classified within a stream, scheduler passes are bounded and fair, and GUIDs are UUIDv5.
 

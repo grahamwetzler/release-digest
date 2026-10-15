@@ -238,8 +238,8 @@ When a new release fixes a serious security issue, the feed item alone is too ea
    - **Allowlist (required).** The line must take one of two forms. Anything else, including prose like "we will fix …", never qualifies, so new phrasings fail closed.
      - It **starts**, after list markers and an optional `Security:`/`[security]` prefix, with an imperative or third-person fix verb, the usual changelog-entry form: `Fix`, `Fixes`, `Patch`, `Patches`, `Resolve`, `Resolves`, `Address`, `Addresses`, `Mitigate`, `Mitigates`. Examples: "Fix CVE-…", "- Fixes GHSA-… (#123)".
      - It contains a **completed** form linked to the ID: `fixed`, `patched`, `resolved`, `addressed` or `mitigated`, as in "CVE-… is fixed" or "patched GHSA-…".
-   - **Denylist (still applied).** No whole-word, case-insensitive negation, hedge or future marker appears anywhere on the line: `not`, `no`, `never`, `don't`, `doesn't`, `won't`, `cannot`, `can't`, `without`, `unfixed`, `still`, `pending`, `upcoming`, `planned`, `will`, `would`, `should`, `going to`, `next`, `future`, `later`, `soon`, `known issue`, `upstream`, `workaround`.
-   - Together they reject phrasing like "We do not fix CVE-…", "We will fix CVE-… in the next release", "a fix is planned for GHSA-…" and "upstream patch for CVE-… pending".
+   - **Denylist (still applied).** No whole-word, case-insensitive negation, hedge or future marker appears anywhere on the line: `not`, `no`, `never`, `don't`, `doesn't`, `won't`, `cannot`, `can't`, `without`, `unfixed`, `still`, `partially`, `partial`, `incomplete`, `pending`, `upcoming`, `planned`, `will`, `would`, `should`, `going to`, `next`, `future`, `later`, `soon`, `known issue`, `upstream`, `workaround`. Apostrophes are normalized (`’` → `'`) first. Then **any** word ending in `n't` (`isn't`, `wasn't`, `aren't`, `hasn't`, `didn't`, `couldn't`, …) is rejected by pattern rather than by listing each one. So are the apostrophe-less forms, which are listed explicitly (`isnt`, `wasnt`, `arent`, `hasnt`, `hadnt`, `didnt`, `doesnt`, `dont`, `wont`, `cant`, `couldnt`, `havent`) because a bare `nt` suffix would also catch words like "important".
+   - Together they reject phrasing like "We do not fix CVE-…", "We will fix CVE-… in the next release", "a fix is planned for GHSA-…", "CVE-… isn't fixed yet" and "upstream patch for CVE-… pending".
    - The rule is **deliberately conservative**. A false negative only drops this signal, while the LLM signal and the feed marking remain. A false positive sends a wrong urgent alert, which is worse.
 3. **Neither.** The link is stored with `fixes = 0`. The advisory doesn't fire the signal and is logged.
 
@@ -270,14 +270,14 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 Config inputs are fingerprinted, and the fingerprint is stored in `scheduler_state`. At startup and on SIGHUP, a changed fingerprint triggers a recompute of every alert-eligible or currently marked release of the affected repos.
 
 - **At startup**, the recompute finishes before the outbox worker starts.
-- **On SIGHUP**, the worker is already running, so the two are synchronized by a **reload lock**. The worker holds the lock in shared mode from each claim through that row's final state. Reload takes it exclusively:
-  1. It sets `reload_pending`, which stops new claims.
-  2. Rows that are claimed but haven't started their POST are **released**. The worker's pre-POST re-read also checks `reload_pending`. If it's set, the row goes straight back to `queued` (no backoff, no attempt counted) without sending.
-  3. It waits only for POSTs **already in flight**, at most one request timeout (10s).
+- **On SIGHUP**, the worker is already running, so the two are synchronized by a short **send gate** (an in-process mutex) and an in-flight counter. No lock is held across a POST, so reload never waits behind a claim:
+  1. Reload takes the gate, sets `reload_pending` and releases the gate. This happens first, before any waiting, and new claims stop at once.
+  2. The worker's decision to send is made **under the gate**: it takes the gate, re-reads the row and `reload_pending`, and only if the row is still `claimed` and the flag is clear does it mark the row `sending`, increment the in-flight counter and release the gate. Then it POSTs. If the flag is set, the row goes straight back to `queued` (no backoff, no attempt counted) without sending. Because the flag is set and checked under the same gate, there's no gap between the check and the start of a POST: every row is either already `sending` when the flag is set or sees the flag.
+  3. Reload waits only until the in-flight counter drains, at most one request timeout (10s).
   4. It recomputes and commits. Released rows are re-evaluated like any queued row, so a now-stale one is cancelled.
-  5. It clears `reload_pending` and releases the lock.
+  5. It takes the gate, clears `reload_pending` and releases it.
 
-  The only alert that can go out stale is one whose POST had already begun before the SIGHUP. That's the same one-request window as other cancellation races, and it's logged.
+  The only alert that can go out stale is one already marked `sending` before reload set the flag. That's the same one-request window as other cancellation races, and it's logged.
 
 Either way, a queued alert that a config change made stale is cancelled before it can be claimed or sent.
 
@@ -726,10 +726,11 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - Re-escalation by a different advisory rebuilds the payload.
   - De-escalation then re-escalation while a row is `sending`: on POST failure, the row is re-queued with the rebuilt payload, not cancelled.
   - SIGHUP that changes `packages`:
-    - while the worker holds a claim that hasn't POSTed: the row is released to `queued` without sending, recomputed and cancelled
+    - while the worker holds a claim that hasn't POSTed: reload sets `reload_pending` without waiting on the claim; the row is released to `queued` without sending, recomputed and cancelled
+    - the flag set between the worker's re-read and its POST is impossible: a test interleaves reload at each step of the worker's gate section and asserts the row is either already `sending` or released
     - while a POST is in flight: reload waits for it and logs it if the alert turned stale
     - a stale queued alert for another release is cancelled before any further claim
-  - Advisory fix evidence when `prev_tag` is unknown: a later release that only cites the advisory gets no version evidence and needs text evidence. These all yield `fixes = 0`: "We do not fix CVE-…", "We will fix CVE-… in the next release", "fix planned for GHSA-…", and free prose without an allowlisted form ("this release is about CVE-…"). These yield `fixes = 1`: "- Fix CVE-… in parser", "Security: Fixes GHSA-…" and "CVE-… is patched".
+  - Advisory fix evidence when `prev_tag` is unknown: a later release that only cites the advisory gets no version evidence and needs text evidence. These all yield `fixes = 0`: "We do not fix CVE-…", "We will fix CVE-… in the next release", "fix planned for GHSA-…", "CVE-… isn't fixed", "CVE-… wasn’t fully patched" (curly apostrophe), "CVE-… is partially mitigated", and free prose without an allowlisted form ("this release is about CVE-…"). These yield `fixes = 1`: "- Fix CVE-… in parser", "Security: Fixes GHSA-…" and "CVE-… is patched".
   - The outbox delivers and retries between ticks using only its just-in-time check, including the final pre-expiry attempt.
   - Sweep rotation: 3 always-timing-out repos at the head of the list don't stop the others being confirmed within the stated number of ticks.
   - Editing a repo's `packages`, then SIGHUP, re-matches advisories and cancels a now-stale queued alert before the worker runs.

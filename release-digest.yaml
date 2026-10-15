@@ -1,0 +1,14 @@
+# Local development config. `go run ./cmd/release-digest run` picks it up.
+version: 1
+store_path: release-digest.db
+listen: "127.0.0.1:8080"
+public_base_url: http://localhost:8080
+log:
+  format: text
+  level: debug
+
+repos:
+  - repo: astral-sh/uv
+  - repo: golang/go
+    sources: [tags]
+    tag_pattern: '^go1\.\d+(\.\d+)?$'

@@ -1,0 +1,9 @@
+.git
+.roborev
+bin
+out
+secrets
+compose.override.yaml
+*.db
+*.db-wal
+*.db-shm

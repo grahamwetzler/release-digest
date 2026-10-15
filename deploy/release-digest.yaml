@@ -1,0 +1,24 @@
+# The config baked into the image. Repos usually come from
+# RELEASE_DIGEST_REPOS in compose.yaml; list per-repo options here.
+# Secrets never go in this file (PLAN.md §4.3).
+version: 1
+
+store_path: /data/release-digest.db
+listen: ":8080"
+# public_base_url comes from RELEASE_DIGEST_PUBLIC_BASE_URL.
+
+feed:
+  title: Release Digest
+  description: Condensed release notes for the projects I depend on.
+
+schedule:
+  interval: 1h
+  jitter: 5m
+
+llm:
+  base_url: https://openrouter.ai/api/v1   # or http://ollama:11434/v1
+  model: anthropic/claude-haiku-5.5        # placeholder; any OpenRouter slug
+  headers:
+    X-Title: Release Digest
+
+repos: []

@@ -1,0 +1,203 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"release-digest/internal/config"
+	"release-digest/internal/render"
+	"release-digest/internal/scheduler"
+	"release-digest/internal/secret"
+	"release-digest/internal/server"
+)
+
+// listening, when set, is told the address run serves on (for tests that listen on port 0).
+var listening func(addr string)
+
+// Shutdown takes at most stopTimeout + drainTimeout; compose.yaml's
+// stop_grace_period must leave room for both.
+const (
+	drainTimeout = 10 * time.Second // for open HTTP connections at shutdown
+	stopTimeout  = 30 * time.Second // for the tick in flight at shutdown
+)
+
+const stateLastTick = "last_tick"
+
+// tick runs one scheduler pass. In milestone 1 that is only the render;
+// poll and summarize slot in before it (§3).
+func (e *env) tick(ctx context.Context, srv *server.Server) {
+	start := time.Now()
+	feeds, err := render.Publish(ctx, e.store, e.cfg, generator(), start)
+	if err != nil {
+		e.log.Error("render failed; still serving the last good feed", "err", err)
+	} else if srv != nil {
+		srv.Set(feeds)
+	}
+	if err := e.store.SetStateTime(ctx, stateLastTick, start); err != nil {
+		e.log.Error("recording the tick", "err", err)
+	}
+	e.log.Info("tick done", "took", time.Since(start).Round(time.Millisecond))
+}
+
+// cmdRun is the long-running mode: the scheduler plus the HTTP server.
+func cmdRun(args []string, stdout, stderr io.Writer) int {
+	fs, cfgPath := newFlags("run", stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	e, code := open(ctx, *cfgPath, stderr)
+	if e == nil {
+		return code
+	}
+	defer e.store.Close()
+	c := e.cfg
+
+	srv := server.New(c.Feed.Title, c.PublicBaseURL, e.log)
+	if err := srv.Load(ctx, e.store); err != nil {
+		e.log.Warn("no stored feed to serve yet", "err", err)
+	}
+	ln, err := net.Listen("tcp", c.Listen)
+	if err != nil {
+		fmt.Fprintf(stderr, "release-digest: %v\n", err)
+		return 1
+	}
+	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	served := make(chan error, 1)
+	go func() { served <- hs.Serve(ln) }()
+	e.log.Info("serving", "addr", ln.Addr().String(), "repos", len(c.Repos), "version", version)
+
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for range hup {
+			e.reloadSecrets(secret.OS)
+		}
+	}()
+
+	// Ticks don't use ctx: on a signal the tick in flight finishes. tickCtx
+	// is only cancelled if that takes longer than stopTimeout.
+	tickCtx, cancelTicks := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelTicks()
+	sched := &scheduler.Scheduler{
+		Interval: c.Schedule.Interval.D,
+		Jitter:   c.Schedule.Jitter.D,
+		LastTick: func(ctx context.Context) (time.Time, error) { return e.store.StateTime(ctx, stateLastTick) },
+		Tick:     func(context.Context) { e.tick(tickCtx, srv) },
+	}
+	scheduled := make(chan error, 1)
+	go func() { scheduled <- sched.Loop(ctx) }()
+	if listening != nil {
+		listening(ln.Addr().String())
+	}
+
+	failed, schedDone := false, false
+	select {
+	case <-ctx.Done():
+		e.log.Info("shutting down")
+	case err := <-served:
+		e.log.Error("http server stopped", "err", err)
+		failed = true
+		stop()
+	case err := <-scheduled:
+		schedDone = true
+		if err == nil && ctx.Err() != nil {
+			e.log.Info("shutting down")
+			break
+		}
+		// Without the scheduler the feed would silently stop refreshing while
+		// /healthz stays green; exit so the container is restarted.
+		e.log.Error("scheduler stopped; exiting", "err", err)
+		failed = true
+		stop()
+	}
+	if !schedDone {
+		timer := time.AfterFunc(stopTimeout, cancelTicks)
+		if err := <-scheduled; err != nil {
+			e.log.Error("scheduler", "err", err)
+			failed = true
+		}
+		timer.Stop()
+	}
+
+	dctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+	defer cancel()
+	if err := hs.Shutdown(dctx); err != nil {
+		e.log.Warn("http drain", "err", err)
+	}
+	if failed {
+		return 1
+	}
+	return 0
+}
+
+// reloadSecrets re-reads every secret on SIGHUP (§4.3). If any fails, every
+// secret keeps its current value: a half-applied rotation is worse than none.
+func (e *env) reloadSecrets(env secret.Env) {
+	loaded, err := loadSecrets(env)
+	if err != nil {
+		e.log.Error("SIGHUP: secrets not reloaded; keeping the current ones", "err", err)
+		return
+	}
+	// TODO(milestone 2): run the token guard on a new GitHub token before activating it (§3.1).
+	e.secrets.LLM.Set(loaded[0])
+	e.secrets.GitHub.Set(loaded[1])
+	e.secrets.Ntfy.Set(loaded[2])
+	logSecrets(e.log, loaded)
+	e.log.Info("SIGHUP: secrets reloaded")
+}
+
+// cmdHealthcheck probes /healthz on the local server, for Docker's
+// HEALTHCHECK in an image with no shell or curl.
+func cmdHealthcheck(args []string, stdout, stderr io.Writer) int {
+	fs, cfgPath := newFlags("healthcheck", stderr)
+	url := fs.String("url", "", "URL to probe (default: /healthz on the configured listen address)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *url == "" {
+		c, err := config.Load(*cfgPath, os.LookupEnv)
+		if err != nil {
+			return reportErrors(err, stderr)
+		}
+		if *url, err = healthURL(c.Listen); err != nil {
+			fmt.Fprintf(stderr, "release-digest: %v\n", err)
+			return 2
+		}
+	}
+	hc := &http.Client{Timeout: 5 * time.Second}
+	resp, err := hc.Get(*url)
+	if err != nil {
+		fmt.Fprintf(stderr, "unhealthy: %v\n", err)
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(stderr, "unhealthy: %s answered %s\n", *url, resp.Status)
+		return 1
+	}
+	fmt.Fprintln(stdout, "ok")
+	return 0
+}
+
+// healthURL is the loopback /healthz URL for a listen address such as ":8080".
+func healthURL(listen string) (string, error) {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "", fmt.Errorf("listen address %q: %w", listen, err)
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz", nil
+}

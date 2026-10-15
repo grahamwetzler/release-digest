@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xml:lang="en">
+  <id>https://rss.example.com/feed.atom</id>
+  <title type="text">Release Digest</title>
+  <subtitle type="text">Condensed release notes for the projects I depend on.</subtitle>
+  <updated>2026-10-15T13:00:00Z</updated>
+  <author>
+    <name>Release Digest</name>
+  </author>
+  <link rel="self" type="application/atom+xml" href="https://rss.example.com/feed.atom"></link>
+  <link rel="alternate" type="text/html" href="https://rss.example.com/"></link>
+  <generator>release-digest/test</generator>
+  <entry>
+    <id>urn:uuid:13675a19-6025-50cc-beb9-5a423ff36c63</id>
+    <title type="text">astral-sh/uv 0.9.4</title>
+    <link rel="alternate" type="text/html" href="https://github.com/astral-sh/uv/releases/tag/0.9.4"></link>
+    <published>2026-10-15T12:00:00Z</published>
+    <updated>2026-10-15T13:00:00Z</updated>
+    <category term="astral-sh/uv"></category>
+    <summary type="text">Release notes for astral-sh/uv 0.9.4.</summary>
+    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/astral-sh/uv/releases/tag/0.9.4&#34;&gt;Release notes&lt;/a&gt; for astral-sh/uv 0.9.4.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>urn:uuid:f5e760ae-d7bf-5704-b4e8-7ac51a0ca91d</id>
+    <title type="text">aws/aws-sdk-go-v2 service/s3/v1.2.3</title>
+    <link rel="alternate" type="text/html" href="https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3"></link>
+    <published>2026-10-14T12:00:00Z</published>
+    <updated>2026-10-14T13:00:00Z</updated>
+    <category term="aws/aws-sdk-go-v2"></category>
+    <summary type="text">Tag for aws/aws-sdk-go-v2 service/s3/v1.2.3.</summary>
+    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3&#34;&gt;Tag&lt;/a&gt; for aws/aws-sdk-go-v2 service/s3/v1.2.3.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>urn:uuid:6bd39253-6b16-5373-9303-a64614c4a9a7</id>
+    <title type="text">o/semver Build &lt;5&gt; &amp; more (pre-release)</title>
+    <link rel="alternate" type="text/html" href="https://github.com/o/semver/releases/tag/1.0.0+build.5"></link>
+    <published>2026-10-13T12:00:00Z</published>
+    <updated>2026-10-13T13:00:00Z</updated>
+    <category term="o/semver"></category>
+    <category term="prerelease"></category>
+    <summary type="text">Release notes for o/semver 1.0.0+build.5.</summary>
+    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/o/semver/releases/tag/1.0.0+build.5&#34;&gt;Release notes&lt;/a&gt; for o/semver 1.0.0+build.5.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>urn:uuid:57d81944-317d-5742-a8f7-78f64aabf842</id>
+    <title type="text">o/unicode 版本-1</title>
+    <link rel="alternate" type="text/html" href="https://github.com/o/unicode/releases/tag/版本-1"></link>
+    <published>2026-10-12T12:00:00Z</published>
+    <updated>2026-10-12T13:00:00Z</updated>
+    <category term="o/unicode"></category>
+    <summary type="text">Tag for o/unicode 版本-1.</summary>
+    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/o/unicode/releases/tag/版本-1&#34;&gt;Tag&lt;/a&gt; for o/unicode 版本-1.&lt;/p&gt;</content>
+  </entry>
+</feed>

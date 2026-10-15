@@ -1,0 +1,44 @@
+name: release-digest
+services:
+  release-digest:
+    image: release-digest:latest
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    restart: unless-stopped
+    # Shutdown lets the tick in flight finish (up to 30s), then drains HTTP (10s).
+    stop_grace_period: 45s
+    environment:
+      RELEASE_DIGEST_PUBLIC_BASE_URL: https://rss.example.com
+      RELEASE_DIGEST_REPOS: |
+        anthropics/anthropic-sdk-go
+        astral-sh/uv
+      # No key env vars: both secrets are picked up from /run/secrets/ (PLAN.md §4.3).
+    secrets: [llm_api_key, github_token]
+    volumes:
+      # A named volume works as is. A bind mount (./data:/data) must be
+      # writable by the container's nonroot user: chown 65532:65532 ./data
+      - release-digest-data:/data
+      # A directory, not a single file, so an editor's save-by-rename is seen.
+      - ./deploy:/config:ro
+    expose: ["8080"] # the reverse proxy joins this network; no host port needed
+    # Per-host settings (the real public URL, a host port, the ntfy token
+    # secret) go in an untracked compose.override.yaml, which docker compose
+    # merges in automatically.
+
+  ollama: # optional local LLM: docker compose --profile ollama up
+    profiles: [ollama]
+    image: ollama/ollama:0.12.6
+    volumes: [ollama:/root/.ollama]
+
+secrets:
+  # Create these once: see README.md. secrets/ is gitignored.
+  llm_api_key:
+    file: ./secrets/llm_api_key
+  github_token:
+    file: ./secrets/github_token
+
+volumes:
+  release-digest-data:
+  ollama:

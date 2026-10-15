@@ -11,7 +11,7 @@ A Go service that watches a configured list of GitHub repositories for new versi
 1. **One summarized item per release.** Each new version of a watched repo becomes one feed item. The item has a short LLM-written TL;DR and a link to the full notes.
 2. **Works on repos that don't do Releases well.** It uses GitHub Releases when a repo has them, falls back to tags when it doesn't, and pulls from `CHANGELOG.md` when the release body is empty or just says "see changelog".
 3. **Any OpenAI-compatible LLM.** It speaks one protocol, `POST /v1/chat/completions`, so Ollama, LM Studio, vLLM, OpenRouter, OpenAI and Anthropic's OpenAI-compatible endpoint all work through config alone.
-4. **Cheap and stable.** Each release is summarized **once** and cached by input hash, so re-running never re-bills the LLM. A published item's **identity** (GUID, link, pubDate) never changes. Its **content** changes in only two cases: a fallback item is upgraded to a real summary (§3.3), or the user runs `resummarize` explicitly. GitHub is polled with conditional requests.
+4. **Cheap and stable.** Each release is summarized **once** and cached by input hash, so re-running never re-bills the LLM. A published item's **identity** (GUID, link, pubDate) never changes. Its **content** changes in only three cases, each of which advances the entry's `updated` time (§5): a `fallback` item is upgraded to a real summary, a `no_notes` item gains notes that appeared later (§3.3), or the user runs `resummarize` explicitly. A published item is never pulled from the feed except by confirmed deletion (§3.1) or `max_items` rollover. GitHub is polled with conditional requests.
 5. **Spec-compliant output.** RSS 2.0 passes the W3C validator, with stable GUIDs and timestamps. Atom 1.0 comes almost free by reusing feed-me's renderer.
 6. **Easy to run.** It ships as one static binary in a distroless image, keeps its SQLite store on a volume, and takes config from a YAML file plus env overrides.
 7. **Secrets stay out of env and config.** API keys can come from Docker secrets (files under `/run/secrets/`), so an OpenRouter key never appears in `docker inspect`, compose files, or the process environment (§4.3).
@@ -58,7 +58,7 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 
 **Bounded passes:** no single slow repo or flaky upstream can stall the feed.
 
-- The whole tick has a deadline, `schedule.pass_budget` (default 15m). The poll and summarize stages each stop when it's reached, and their unfinished work stays queued in the store for the next tick.
+- **Each stage has its own budget**, so neither can starve the other: `schedule.poll_budget` (default 7m) and `schedule.summarize_budget` (default 7m). A stage that hits its budget stops, and its unfinished work stays persisted for the next tick. The summarize stage always runs after poll, whatever poll's outcome, so the LLM makes progress even if GitHub eats its full allowance every tick. Render runs outside both budgets.
 - **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback` (§3.3), so fallback publication never waits on GitHub or the LLM.
 - Render also runs after every 5 completed summaries, so a long summarize pass publishes as it goes.
 
@@ -68,16 +68,33 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 
 For each repo:
 
-0. **Public check.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` at most once a day. If `private` is `true`, the repo is refused: it is logged as an error, recorded in `repo_state.last_error`, and never fetched or summarized. `config lint` fails on it. A repo that turns private later stops being polled. Its already-published items stay in the feed, since they were public when fetched.
+0. **Public check, every poll, fail-closed.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` **before every poll** of that repo. When authenticated, an unchanged repo is a 304 and costs no rate limit. The repo is fetched only if this tick's response (or its validated 304) says `private: false`. If the response says `private: true`, or the check fails for any reason (error, timeout, rate limit), nothing else is fetched for that repo this tick.
+   - On `private: true`, the repo is marked refused in `repo_state` and an error is logged. Its queued `pending` releases move to `skipped` so they never reach the LLM. `config lint` fails on it.
+   - A repo that turns private keeps its already-published items, since they were public when fetched.
+
+**Token guard (startup, hard).** Public-only is enforced on the credential too, not just recommended:
+
+- For a classic token, if the `X-OAuth-Scopes` response header includes `repo`, startup fails.
+- For any token, `GET /user/repos?visibility=private&per_page=1` must return an empty list, otherwise startup fails. The message says to use a fine-grained token with **"Public repositories (read-only)"** access.
+
+So a misconfigured token can't fetch private content even during the window between a repo going private and the next visibility check.
 1. `GET /repos/{owner}/{repo}/releases?per_page=30` (page 1) with `If-None-Match`. When authenticated, a 304 doesn't count against the rate limit.
 2. If the repo has **no releases** (or `sources: [tags]` is set), call `GET /repos/{owner}/{repo}/tags?per_page=30` and resolve each new tag's commit date with `GET /repos/{owner}/{repo}/commits/{sha}`, whose result is cached forever.
-3. **Catch-up pagination.** If every entry on page 1 is unseen and the repo has already been initialized, after downtime or a burst of releases, fetch further pages until a known tag appears or `max_pages` (default 5) is reached. Unseen versions beyond the cap are recorded as `skipped` with a logged warning.
+3. **Catch-up pagination.** Each repo persists a **scan boundary**: the newest tag of its last *completed* scan, stored in `repo_state.scan_boundary`. If page 1 doesn't contain the boundary, which happens after downtime or a burst of releases, further pages are fetched until it appears or `max_pages` (default 5) is reached.
+   - Rows are inserted as pages arrive, but the boundary only advances to page 1's newest tag once the scan **completes**: the boundary is found, the cap is reached, or the list ends.
+   - An interrupted scan (timeout, rate limit, budget, restart) leaves the boundary where it was, so the next tick re-walks the same pages. ETags make the repeat cheap, and rows already inserted are idempotent.
+   - Versions past the cap are **intentionally omitted**: never fetched, never recorded. A warning names the repo and the number of pages scanned.
 4. Classify each version (§3.1.1). Then filter by `include_prereleases`, by drafts (always excluded) and by the optional `tag_pattern` / `exclude_pattern` regexes, such as skipping `nightly-*`. Filtered versions are recorded as `skipped`, which keeps them available for predecessor selection (§3.2.1).
 5. Insert each unseen, unfiltered version as a `release` row in state `pending`.
 
 **First sight of a repo:** only page 1 is read, and only its newest `backfill` versions are queued (default 3). The rest of page 1 is recorded as `skipped` so they're never summarized but can serve as predecessors. That keeps the LLM bill for adding a repo predictable. `repo_state.initialized_at` is set only after this completes without error. An interrupted first poll is redone from scratch, not treated as initialized.
 
-**Deletion detection.** Disappearing from a list response is never enough to mark a release deleted: lists are paginated and windowed. A stored release is a deletion *candidate* only if it is newer than the oldest entry on page 1 yet absent from page 1, so it should have been there. Each candidate is confirmed with a direct check: `GET /repos/{o}/{r}/releases/tags/{tag}` or `GET /repos/{o}/{r}/git/ref/tags/{tag}` must return 404. Only then is `missing_since` set. Any other outcome leaves the record untouched: an error, a rate limit, a timeout, or a poll cut short by the budget. If a later poll sees the release again, `missing_since` is cleared.
+**Deletion detection.** Disappearing from a list response is never enough to mark a release deleted: lists are paginated and windowed. Deletion is decided only by a **direct existence check**: `GET /repos/{o}/{r}/releases/tags/{tag}` for releases, or `GET /repos/{o}/{r}/git/ref/tags/{tag}` for tags, sent conditionally and recorded in `last_verified_at`. Two things trigger a check:
+
+1. **Window candidates (immediate).** A stored release newer than the oldest entry on page 1 but absent from page 1 should have been there, so it's checked in the same poll. If page 1 is empty, every stored published release of that repo is a candidate.
+2. **Rotating sweep (bounded).** Each tick, up to `github.verify_per_tick` (default 10) published releases across all repos are checked, oldest `last_verified_at` first. This eventually catches deletions of releases that have aged out of the page-1 window. With 200 items and an hourly tick, every item is re-verified within a day.
+
+Only a 404 sets `missing_since`. Any other outcome leaves the record untouched: an error, a rate limit, a timeout, or a check cut short by the budget. A later successful check or list appearance clears `missing_since`.
 
 **Rate limits:** `GITHUB_TOKEN` is optional but strongly recommended (60 vs 5,000 req/h). The client reads `X-RateLimit-Remaining`, `X-RateLimit-Reset` and `Retry-After`. If the reset is under 2 minutes away, it waits. Otherwise it ends the poll stage early, and the round-robin cursor (§3) resumes there next tick. Recommended token: a fine-grained token with **"Public repositories (read-only)"** access and no other permissions. It can't read private repos even by mistake.
 
@@ -153,11 +170,16 @@ The resolved text, its source (`release_body` / `changelog` / `compare`) and its
 |---|---|---|---|
 | `skipped` | no | no | terminal: backfill, filter or catch-up overflow |
 | `pending` | no | yes, when `next_attempt_at ≤ now` | → `summarized` on success; → `fallback` at render time once `now − first_seen_at ≥ llm.publish_after` (default 6h); → `no_notes` when notes resolve to none |
-| `fallback` | yes, excerpt | yes, when `next_attempt_at ≤ now` and `now − first_seen_at < 7d` | → `summarized` on success; content updates, identity doesn't |
+| `fallback` | yes, excerpt | yes, when `next_attempt_at ≤ now` (no age cutoff) | → `summarized` on success; content updates, identity doesn't |
 | `summarized` | yes | no | → re-summarized only by `resummarize` |
-| `no_notes` | yes, deterministic | no | terminal (a later poll that finds new notes resets it to `pending`) |
+| `no_notes` | yes, deterministic | no | → `fallback` when a later poll finds notes (the release body was edited or a changelog section appeared). It stays in the feed and becomes eligible immediately |
 
-A fallback item shows the first ~600 chars of the notes as plain text, plus a note that the summary is pending. Milestone 2 (§10) publishes through this same `fallback` path, so items from before LLM support was built are upgraded automatically once milestone 4 lands. No migration is needed.
+**Rules:**
+
+- **Visible states.** `fallback`, `summarized` and `no_notes` are all visible. Every transition between them keeps the item in the feed and sets `content_updated_at`.
+- **No age cutoff.** `fallback` items have none, because the backoff cap already limits a long LLM outage to at most one attempt per item per day. When the LLM comes back, every fallback is upgraded, oldest first, within the `max_per_pass` limit.
+- **Fallback content.** A fallback item shows the first ~600 chars of the notes as plain text, plus a note that the summary is pending.
+- **Milestone 2.** Milestone 2 (§10) publishes through this same `fallback` path. Items from before LLM support, however old, are upgraded automatically once milestone 4 lands, with no migration.
 
 ### 3.4 Store
 
@@ -197,10 +219,12 @@ feed:
 schedule:
   interval: 1h       # RELEASE_DIGEST_SCHEDULE_INTERVAL
   jitter: 5m
-  pass_budget: 15m   # whole-tick deadline; render always runs (§3)
+  poll_budget: 7m       # per-stage deadlines; render always runs (§3)
+  summarize_budget: 7m
 
 github:
   api_url: https://api.github.com          # GHES works too
+  verify_per_tick: 10                      # rotating deletion checks (§3.1)
   # token: see §4.3 (GITHUB_TOKEN_FILE / GITHUB_TOKEN)
 
 llm:
@@ -265,6 +289,7 @@ Rules:
 
 - **GUID:** a UUIDv5 of `{owner}/{repo}@{tag}`, with the repo lowercased and the tag exact. It uses a fixed namespace UUID compiled into the binary. RSS emits it with `isPermaLink="false"`, and Atom emits `urn:uuid:{uuid}`. It is stable across renames of the release title, and it's exactly the shape feed-me's `feed.AtomID` already produces (`feed-me/internal/feed/atom.go:65`), so the renderer ports unchanged. A UUID can't come out malformed whatever characters a tag contains (`/`, `+`, unicode). The golden-feed tests include such tags.
 - **pubDate:** the release's `published_at`, or the tag commit's committer date for tag-only repos. Once stored, it is frozen (feed-me §5). A release that's deleted and re-created with the same tag keeps its original item.
+- **Updated time:** `content_updated_at` is set when an item first becomes visible, and advanced on every content change (§1, §3.3). It's passed to the renderer as `Item.Updated`, so Atom `<updated>` moves while `<published>` and the ID stay fixed, and readers that honor updates re-show the upgraded entry. RSS 2.0 has no per-item updated element. The new `<description>` is enough for readers that diff content.
 - **Ordering:** by pubDate descending. Backfilled releases keep their real dates, so they sort into the past rather than flooding the top of the feed.
 - **Deleted releases:** these are marked `missing_since` only after a confirmed 404 (§3.1, Deletion detection). They're dropped from the feed after 7 days, in case the deletion is a re-publish in progress.
 
@@ -400,6 +425,8 @@ CREATE TABLE releases (
   attempts       INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER,
   last_error     TEXT NOT NULL DEFAULT '',
+  content_updated_at INTEGER,              -- Atom <updated> (§5)
+  last_verified_at   INTEGER,              -- deletion sweep (§3.1)
   missing_since  INTEGER,
   PRIMARY KEY (repo, tag)
 );
@@ -419,7 +446,9 @@ CREATE TABLE summaries (
 
 CREATE TABLE http_cache (url TEXT PRIMARY KEY, etag TEXT, body BLOB, fetched_at INTEGER);
 CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_success_at INTEGER,
-                         is_private INTEGER, visibility_checked_at INTEGER, last_error TEXT DEFAULT '');
+                         refused_private INTEGER NOT NULL DEFAULT 0, visibility_checked_at INTEGER,
+                         scan_boundary TEXT,          -- newest tag of last completed scan (§3.1)
+                         last_error TEXT DEFAULT '');
 CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- e.g. poll round-robin cursor
 CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at INTEGER);
 ```
@@ -432,8 +461,9 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
   - pagination and catch-up past page 1
   - 304s and rate-limit headers, including an early stop and cursor resume
   - repos with no releases and repos with draft releases
-  - private repos being refused
-  - deletion detection: a release that ages off page 1 is **not** a candidate, a candidate with a 404 is marked, and a candidate whose check errors or hits a rate limit is left alone
+  - a catch-up interrupted on page 3, then resumed after a restart, ending with the boundary advanced exactly once
+  - private repos being refused, a visibility check that errors (fail-closed: no content requests), and the token guard rejecting a `repo`-scoped token
+  - deletion detection: a release that ages off page 1 is **not** a window candidate but is caught by the rotating sweep, an empty page 1, a candidate with a 404 is marked, and a candidate whose check errors or hits a rate limit is left alone
 - **version:** table tests of classification and predecessor selection:
   - `v2.0.0-rc.1`, `go1.28rc1`, `1.0.0beta2`, `service/api/v1.4.0`, `latest`
   - a maintenance-branch `1.2.4` after `2.0.0`
@@ -442,7 +472,8 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
 - **notes:** table tests over real changelog fixtures with different heading styles (Keep a Changelog, `## v1.2.3 (2026-01-01)`, `# [1.2.3](link)`, setext `===`/`---`) and the "see changelog" heuristics. Also the compare-fallback edge cases: no predecessor, 404, diverged or too large, all noise → `no_notes`.
 - **llm:** a fake OpenAI-compatible server that exercises the `json_schema` → `json_object` → prompt-only fallback, malformed JSON with a repair retry, 429 backoff and timeouts.
 - **summarize:** the cache key differs when only the repo, version, `prev_tag` or `prompt_file` *contents* differ, and matches for byte-identical requests. Also the state machine: `pending` → `fallback` at render time even while the LLM is down, `fallback` → `summarized` after the LLM recovers across a restart, keeping the GUID and pubDate. `next_attempt_at` backoff is persisted.
-- **scheduler:** with a fake GitHub that hangs and a fake LLM that fails, the tick still renders within `pass_budget`, expired fallbacks are published, and the next tick resumes polling at the cursor.
+- **scheduler:** with a fake GitHub that hangs and a fake LLM that fails, the tick still renders, expired fallbacks are published, and the next tick resumes polling at the cursor. With a fake GitHub that always uses all of `poll_budget`, summaries still complete every tick.
+- **identity:** a `fallback` → `summarized` upgrade and a `no_notes` → `fallback` transition keep the GUID, the pubDate and feed membership, and advance Atom `<updated>`.
 - **secret:** a table test of the lookup order, both `X` and `X_FILE` set is an error, trailing-newline trimming, missing or empty files, and redaction under `fmt` `%v`/`%+v`/`%#v`, `slog` and `json.Marshal`. A test also asserts that an LLM 401 error message doesn't contain the key.
 - **feed:** golden RSS/Atom files, local spec checks, and `make validate` against W3C (not in every CI run).
 - **End-to-end:** `build` against a fixture GitHub and a fake LLM produces the golden feed byte for byte.
@@ -452,7 +483,7 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
 ## 10. Milestones
 
 1. **Skeleton.** Copy in feed-me's config loading, store, feed, scheduler, server and Dockerfile, renamed. Add the secret loader (§4.3) and UUIDv5 GUIDs (§5). `run` serves an empty valid feed, and a golden test confirms the Atom IDs are well-formed `urn:uuid:` values.
-2. **GitHub poll.** Public check, releases, tags, version classification, predecessor selection, filtering, backfill, catch-up, deletion detection, ETag cache, rate-limit pacing and pass budget. Releases go through the `pending` → `fallback` path (§3.3), so items appear with raw-note excerpts and get upgraded automatically in milestone 4.
+2. **GitHub poll.** Token guard, per-poll public check, releases, tags, version classification, predecessor selection, filtering, backfill, resumable catch-up, deletion detection (window + sweep), ETag cache, rate-limit pacing and stage budgets. Releases go through the `pending` → `fallback` path (§3.3), so items appear with raw-note excerpts and get upgraded automatically in milestone 4.
 3. **Notes resolution.** Changelog section extraction, compare fallback, truncation.
 4. **LLM summaries.** Client, schema, fallbacks, cache, `summarize` dry-run command, rendered item format.
 5. **Hardening.** `config lint`, `resummarize`, deleted-release handling, W3C validation, compose with the Ollama profile, README.
@@ -471,7 +502,8 @@ Milestone 2 alone is already a useful aggregated releases feed, which makes it a
 - A structured TL;DR (headline / breaking / features / fixes / security) with a link to the full notes.
 - Project name `release-digest`, a Go module, living in `~/dev/release-digest`.
 - Secrets are supported through Docker secrets: `*_FILE` env vars and `/run/secrets/<name>` defaults, with plain env for dev. Exactly one source may be present, otherwise it's a startup error. Secrets in YAML are rejected. OpenRouter is the documented default LLM endpoint.
-- **Public repositories only** in v1. Private repos are detected and refused (§3.1).
+- **Public repositories only** in v1. Private repos are refused through a fail-closed visibility check on every poll, plus a startup guard that rejects tokens able to read private repos (§3.1).
+- After the second roborev review: published items are never hidden by state transitions, fallbacks have no age cutoff, catch-up is resumable through a persisted scan boundary, deletion checks rotate across all published items, poll and summarize have separate budgets, and `content_updated_at` drives Atom `<updated>`.
 - After the first roborev review: the summary cache is keyed on the full canonical request, there's an explicit release state machine with fallback retries, deletions need a confirmed 404, tag pre-releases and predecessors are classified within a stream, scheduler passes are bounded and fair, and GUIDs are UUIDv5.
 
 ## 12. Open questions

@@ -233,8 +233,11 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 
 **This release must fix the advisory.** Mentioning an advisory isn't enough, since notes also cite unfixed or upstream CVEs. A matched advisory counts toward *this* release only on positive evidence that the release fixes it:
 
-1. **Version evidence (preferred).** For the matched package, the advisory's `vulnerabilities[]` entry has a `first_patched_version`. Parsed with the release's version scheme (§3.1.1), the release must be **≥ `first_patched_version`**, and its predecessor (`prev_tag`), when known, must fall inside `vulnerable_version_range`. In other words, this is the release that crossed from vulnerable to patched.
-2. **Text evidence (fallback when there's no version data).** The advisory ID appears in the same bullet or line as a fix verb (`fix`, `patch`, `resolve`, `address`, `mitigate`), and not in the same line as a negation (`not yet`, `unfixed`, `still affected`, `known issue`).
+1. **Version evidence (preferred).** For the matched package, the advisory's `vulnerabilities[]` entry has a `first_patched_version`. Parsed with the release's version scheme (§3.1.1), the release must be **≥ `first_patched_version`**, **and** its predecessor (`prev_tag`) must be **known** and fall inside `vulnerable_version_range`. In other words, this is the release that crossed from vulnerable to patched. If `prev_tag` is unknown (a repo's first tracked version, or a predecessor that can't be parsed), version evidence is **unavailable**, not satisfied, and only text evidence can apply.
+2. **Text evidence (fallback when version evidence is unavailable).** The advisory ID appears in the same bullet or line as a fix verb (`fix`, `patch`, `resolve`, `address`, `mitigate`), **and** that line contains no negation or hedge anywhere.
+   - Negations and hedges are matched case-insensitively as whole words: `not`, `no`, `never`, `don't`, `doesn't`, `won't`, `cannot`, `can't`, `without`, `unfixed`, `still`, `pending`, `upcoming`, `planned`, `known issue`, `upstream`, `workaround`.
+   - That rejects phrasing like "We do not fix CVE-…", "a fix is planned for GHSA-…" and "upstream patch for CVE-… pending".
+   - The rule is **deliberately conservative**. A false negative only drops this signal, while the LLM signal and the feed marking remain. A false positive sends a wrong urgent alert, which is worse.
 3. **Neither.** The link is stored with `fixes = 0`. The advisory doesn't fire the signal and is logged.
 
 `fixes` is stored on the link and re-evaluated with `matched` on every recompute.
@@ -261,7 +264,18 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 - a new or updated LLM summary
 - a config change that affects matching or thresholds: `min_severity`, or a repo's `packages`
 
-Config inputs are fingerprinted, and the fingerprint is stored in `scheduler_state`. At startup and on SIGHUP, a changed fingerprint triggers a recompute of every alert-eligible or currently marked release of the affected repos. This finishes **before the outbox worker starts**, so a queued alert that a config change made stale is cancelled before it can be sent. The result is the maximum of the two signals:
+Config inputs are fingerprinted, and the fingerprint is stored in `scheduler_state`. At startup and on SIGHUP, a changed fingerprint triggers a recompute of every alert-eligible or currently marked release of the affected repos.
+
+- **At startup**, the recompute finishes before the outbox worker starts.
+- **On SIGHUP**, the worker is already running, so the two are synchronized by a **reload lock**. The worker holds the lock in shared mode from each claim through that row's final state. Reload takes it exclusively:
+  1. It stops new claims.
+  2. It waits for in-flight sends to finish, at most one request timeout (10s).
+  3. It recomputes and commits.
+  4. Only then does it release the lock.
+
+Either way, a queued alert that a config change made stale is cancelled before it can be claimed or sent.
+
+The result of the recompute is the maximum of the two signals:
 
 - **Advisory signal:** fires if any linked advisory meets three conditions: it isn't withdrawn, it meets `min_severity`, and its link is currently **matched** to this repo, and the link has **`fixes = 1`** (this release fixes it). The match uses the same rules as detection (`source_code_location` or configured `packages`). It's re-evaluated and stored on the link (`release_advisories.matched`) on every recomputation, because both the advisory and the config can change. An advisory mentioned in the notes that belongs to an unrelated dependency never counts.
 - **LLM signal:** the validated LLM urgency.
@@ -307,7 +321,12 @@ Truncation happens at a rune boundary with `…`. The links are in headers (`Cli
 - **De-escalation cancels unsent alerts.** When recomputed urgency drops below `urgent`, the outcome depends on the row's state at that moment. It all happens in one transaction:
   - A `queued` row becomes `cancelled`.
   - A `sending` row gets `cancel_requested = 1`, and the claim table above decides its final state.
-  - If the release escalates again within `max_age`, a `cancelled` row returns to `queued` with `cancel_requested` cleared. Its `reason`, `payload` and priority are **rebuilt from the current deciding signals** in the same transaction, so a re-queued alert never describes a withdrawn advisory.
+- **Re-escalation.** If the release escalates again within `max_age`, the row's `reason`, `payload` and priority are **rebuilt from the current deciding signals** in the same transaction, whatever its state:
+  - A `cancelled` row returns to `queued`.
+  - A `sending` row has `cancel_requested` cleared. The claim table then decides its final state on the **current** flag: a failed POST re-queues with the rebuilt payload instead of being cancelled.
+  - If the in-flight POST had already started with the old payload and it succeeds, the row ends `sent`, and the payload mismatch is logged. That window is one HTTP request.
+
+  A re-queued alert never carries a withdrawn advisory's text.
   - A `sent` row is never touched: no retraction, and no second send.
 - **Crash safety.** A row left in `sending` after a crash or restart goes back to `queued` at startup, which is consistent with at-least-once.
 - **Delivery is at-least-once.** A row is marked `sent` only after a 2xx. If ntfy accepted the POST but the response was lost (timeout, connection reset, crash before the commit), the retry can deliver a **duplicate**. That's deliberate: for an urgent security alert, a rare duplicate beats a lost alert. The README documents it.
@@ -699,6 +718,9 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
     - a visibility timeout after the claim → re-queued with backoff, not stuck
     - a row stuck in `sending` after a crash → re-queued at startup
   - Re-escalation by a different advisory rebuilds the payload.
+  - De-escalation then re-escalation while a row is `sending`: on POST failure, the row is re-queued with the rebuilt payload, not cancelled.
+  - SIGHUP that changes `packages` while the worker holds a claim: reload waits for it, recomputes, and the stale queued alert for another release is cancelled before any further claim.
+  - Advisory fix evidence when `prev_tag` is unknown: a later release that only cites the advisory gets no version evidence and needs text evidence. "We do not fix CVE-…" and "fix planned for GHSA-…" yield `fixes = 0`.
   - The outbox delivers and retries between ticks using only its just-in-time check, including the final pre-expiry attempt.
   - Sweep rotation: 3 always-timing-out repos at the head of the list don't stop the others being confirmed within the stated number of ticks.
   - Editing a repo's `packages`, then SIGHUP, re-matches advisories and cancels a now-stale queued alert before the worker runs.

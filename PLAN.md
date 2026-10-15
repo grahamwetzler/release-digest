@@ -11,7 +11,11 @@ A Go service that watches a configured list of GitHub repositories for new versi
 1. **One summarized item per release.** Each new version of a watched repo becomes one feed item. The item has a short LLM-written TL;DR and a link to the full notes.
 2. **Works on repos that don't do Releases well.** It uses GitHub Releases when a repo has them, falls back to tags when it doesn't, and pulls from `CHANGELOG.md` when the release body is empty or just says "see changelog".
 3. **Any OpenAI-compatible LLM.** It speaks one protocol, `POST /v1/chat/completions`, so Ollama, LM Studio, vLLM, OpenRouter, OpenAI and Anthropic's OpenAI-compatible endpoint all work through config alone.
-4. **Cheap and stable.** Each release is summarized **once** and cached by input hash, so re-running never re-bills the LLM. A published item's **identity** (GUID, link, pubDate) never changes. Its **content** changes in only three cases, each of which advances the entry's `updated` time (§5): a `fallback` item is upgraded to a real summary, a `no_notes` item gains notes that appeared later (§3.3), or the user runs `resummarize` explicitly. A published item is never pulled from the feed except by confirmed deletion (§3.1) or `max_items` rollover. GitHub is polled with conditional requests.
+4. **Cheap and stable.** Each release is summarized **once** and cached by input hash, so re-running never re-bills the LLM. A published item's **identity** (GUID, link, pubDate) never changes. Its **content** changes only through the visible-state transitions in §3.3 or an explicit `resummarize`. Each change advances the entry's `updated` time (§5). The transitions are:
+
+- `fallback` → `summarized`
+- `fallback` → `no_notes`
+- `no_notes` → `fallback` A published item is never pulled from the feed except by confirmed deletion (§3.1) or `max_items` rollover. GitHub is polled with conditional requests.
 5. **Spec-compliant output.** RSS 2.0 passes the W3C validator, with stable GUIDs and timestamps. Atom 1.0 comes almost free by reusing feed-me's renderer.
 6. **Easy to run.** It ships as one static binary in a distroless image, keeps its SQLite store on a volume, and takes config from a YAML file plus env overrides.
 7. **Secrets stay out of env and config.** API keys can come from Docker secrets (files under `/run/secrets/`), so an OpenRouter key never appears in `docker inspect`, compose files, or the process environment (§4.3).
@@ -84,10 +88,10 @@ The only residual exposure is a repo flipping to private in the seconds between 
 - **SIGHUP re-runs the guard** on a replacement token *before* it's activated. If the new token fails, the old one stays in use and an error is logged.
 1. `GET /repos/{owner}/{repo}/releases?per_page=30` (page 1) with `If-None-Match`. When authenticated, a 304 doesn't count against the rate limit.
 2. If the repo has **no releases** (or `sources: [tags]` is set), call `GET /repos/{owner}/{repo}/tags?per_page=30` and resolve each new tag's commit date with `GET /repos/{owner}/{repo}/commits/{sha}`, whose result is cached forever.
-3. **Catch-up pagination.** Each repo persists a **scan boundary**: the newest tag of its last *completed* scan, stored in `repo_state.scan_boundary`. If page 1 doesn't contain the boundary, which happens after downtime or a burst of releases, a catch-up scan starts. Further pages are fetched until the boundary appears or `max_pages` (default 5) is reached.
-   - **Progress is persisted** as the scan runs: `scan_head`, the newest tag when the scan started, and `scan_next_page`. Rows are inserted as pages arrive.
-   - An interrupted scan (timeout, rate limit, budget, restart) **resumes at `scan_next_page − 1`** on the next tick. The one-page overlap absorbs list shifts: new releases push entries down, which only causes duplicates, and those are idempotent by tag. A deletion can pull one entry up, and the overlap catches it. So a scan that needs several ticks' budgets still moves forward every tick.
-   - When the scan **completes** (the boundary is found, the cap is reached, or the list ends), `scan_boundary` becomes `scan_head` and the progress fields are cleared. Releases newer than `scan_head` that arrived during a multi-tick scan show up on page 1 at the next poll.
+3. **Catch-up pagination (atomic).** Each repo persists a **scan boundary**: the newest tag of its last completed scan, stored in `repo_state.scan_boundary`. If page 1 doesn't contain the boundary, which happens after downtime or a burst of releases, pages 2…`max_pages` (default 5) are fetched back-to-back until the boundary appears, the cap is reached, or the list ends.
+   - **All or nothing.** Results are buffered in memory and committed in one transaction only when the scan completes. Then the new rows are inserted and the boundary advances to the newest tag seen on page 1.
+   - **On interruption** (an error, a rate limit, a restart), nothing is written and the boundary stays put. The next tick starts the scan again from page 1. With no stored mid-scan position, pagination shifts between ticks (new releases, deletions of any size) can't cause skips.
+   - **Forward progress is guaranteed by bounding the work, not by checkpoints.** A full scan is at most `max_pages` requests, a few seconds. The stage budget (§3) is checked only *between* repos, so a repo's poll, once started, always runs to completion or failure. The budget can't starve a catch-up. Only persistent GitHub failure can, and that is reported in `repo_state.last_error`.
    - Versions past the cap are **intentionally omitted**: never fetched, never recorded. A warning names the repo and the number of pages scanned.
 4. Classify each version (§3.1.1). Then filter by `include_prereleases`, by drafts (always excluded) and by the optional `tag_pattern` / `exclude_pattern` regexes, such as skipping `nightly-*`. Filtered versions are recorded as `skipped`, which keeps them available for predecessor selection (§3.2.1).
 5. Insert each unseen, unfiltered version as a `release` row in state `pending`.
@@ -161,6 +165,8 @@ The resolved text, its source (`release_body` / `changelog` / `compare`) and its
     "features": ["string"],
     "fixes":    ["string"],
     "security": ["string"],
+    "security_urgency": "none | advisory | urgent",
+    "security_reason": "string",
     "noise_only": false
   }
   ```
@@ -192,11 +198,48 @@ The resolved text, its source (`release_body` / `changelog` / `compare`) and its
 - **Fallback content.** A fallback item shows the first ~600 chars of the notes as plain text, plus a note that the summary is pending.
 - **Milestone 2.** Milestone 2 (§10) publishes through this same `fallback` path. Items from before LLM support, however old, are upgraded automatically once milestone 4 lands, with no migration.
 
-### 3.4 Store
+### 3.4 Urgent security alerts (ntfy)
+
+When a new release fixes a serious security issue, the feed item alone is too easy to miss. Release Digest can also push an alert to an [ntfy](https://ntfy.sh) topic, either self-hosted or ntfy.sh. It's off unless `notify.ntfy` is configured.
+
+**Detection.** A release is **urgent** when either signal fires. The deterministic signal can fire without the LLM, so `fallback` items are covered too.
+
+1. **Advisory signal (deterministic, preferred).** GHSA IDs (`GHSA-xxxx-xxxx-xxxx`) and CVE IDs in the resolved notes are looked up through GitHub's global advisory API: `GET /advisories/{ghsa_id}`, or `GET /advisories?cve_id=…`. The responses are cached forever by ID. The release is urgent if any advisory has a severity ≥ `notify.min_severity` (default `high`) **and** affects this repo's ecosystem package. This signal is authoritative: an LLM can't talk it down.
+2. **LLM signal.** The summary schema gains `"security_urgency": "none" | "advisory" | "urgent"` and `"security_reason": "string"`. The prompt defines `urgent` narrowly: the notes describe a fixed vulnerability that is remote code execution, an authentication or authorization bypass, known exploitation, or an explicit "upgrade immediately". Ordinary hardening and dependency CVE bumps are `advisory`.
+
+   To limit false positives, `urgent` only counts if the item's `security` list is non-empty **and** the resolved notes contain a security keyword (`security`, `vulnerab`, `CVE-`, `GHSA-`, `exploit`). Otherwise it's downgraded to `advisory` and logged.
+
+**What gets sent.** One `POST {notify.ntfy.url}` per urgent release, where the URL is server plus topic:
+
+| ntfy header | Value |
+|---|---|
+| `Title` | `🚨 {repo} {version}: security release` |
+| `Priority` | `5` (max) for critical advisories or LLM `urgent`, otherwise `4` |
+| `Tags` | `rotating_light,{repo}`, plus advisory IDs |
+| `Click` | the GitHub release URL |
+| `Actions` | `view, Advisory, https://github.com/advisories/{ghsa}` for each advisory (max 2) |
+| `Markdown` | `yes` |
+
+The body is the headline, the `security` bullets, the advisory severity and summary when one exists, and `security_reason`. It never includes the full notes.
+
+**When it's sent.** Alerts are queued in an outbox table, `notifications`, and delivered by the render step. Delivery runs outside the poll and summarize budgets, so a slow LLM or GitHub never delays an alert that's already decided.
+
+- **At most once per release.** Rows are keyed by GUID, so `resummarize`, restarts and state transitions never re-send.
+- **Retries.** A failed delivery retries with backoff (1m → 1h cap) for 24h, then is marked `failed` and logged.
+- **Not on backfill.** Releases queued during a repo's first sight (§3.1) or a catch-up scan don't alert by default (`notify.include_backfill: false`). Neither do releases older than `notify.max_age` (default 7d) by pubDate. Adding a repo or restarting after downtime doesn't produce an alert storm.
+- **Pre-releases** alert only if `notify.include_prereleases: true`.
+- **Late detection still counts.** An item already published as `fallback` can turn urgent later when its LLM summary lands. It still alerts once, if it's within `max_age`.
+- **Feed marking.** Urgent items also get a `🚨` title prefix and a `security-urgent` category in the feed, whether or not ntfy is configured.
+
+**Auth.** An ntfy access token is a third secret, loaded exactly like the others (§4.3): `NTFY_TOKEN_FILE`, `/run/secrets/ntfy_token` or `NTFY_TOKEN`. It's sent as `Authorization: Bearer`. On public ntfy.sh, the topic name itself acts as a password. `config lint` warns when the URL is on `ntfy.sh` with no token, and the topic can be kept out of the YAML with `NTFY_URL_FILE` (same rules as a secret).
+
+**Testing it.** `release-digest notify test` sends a sample alert through the configured path. `release-digest notify test --release owner/repo@tag` runs detection on a real release and prints the decision, the signals and the payload, without sending.
+
+### 3.5 Store
 
 SQLite through `modernc.org/sqlite` (pure Go), reusing feed-me's migration approach. See §8 for the schema.
 
-### 3.5 Render and serve
+### 3.6 Render and serve
 
 After any change, the feed is rendered to bytes and held in memory and in the store, so a restart serves immediately. HTTP serves `/feed.xml` (RSS 2.0) and `/feed.atom` with `ETag` and `Last-Modified`, plus `/healthz`. The renderer and validator are lifted from `feed-me/internal/feed`.
 
@@ -253,6 +296,15 @@ llm:
   publish_after: 6h
   # prompt_file: /config/prompt.md
 
+notify:                                    # optional; omit to disable alerts (§3.4)
+  ntfy:
+    url: https://ntfy.example.com/release-alerts   # server + topic; or NTFY_URL_FILE
+    # token: see §4.3 (NTFY_TOKEN_FILE / NTFY_TOKEN)
+  min_severity: high                       # advisory threshold: critical | high | medium
+  max_age: 7d
+  include_backfill: false
+  include_prereleases: false
+
 defaults:                                  # applied to every repo
   sources: [releases, tags]                # tags used only if no releases exist
   include_prereleases: false
@@ -274,12 +326,13 @@ repos:
 
 ### 4.3 Secrets
 
-Each secret can come from exactly **one** of three sources:
+Each secret can come from exactly **one** of three sources. The ntfy topic URL can be supplied the same way (`NTFY_URL_FILE`, `/run/secrets/ntfy_url`, or `notify.ntfy.url` in YAML), since on ntfy.sh the topic itself acts as a password.
 
 | Secret | File path in env | Default Docker secret file | Plain env (dev convenience) |
 |---|---|---|---|
 | LLM API key (e.g. OpenRouter) | `LLM_API_KEY_FILE` | `/run/secrets/llm_api_key` | `LLM_API_KEY` |
 | GitHub token | `GITHUB_TOKEN_FILE` | `/run/secrets/github_token` | `GITHUB_TOKEN` |
+| ntfy access token (§3.4) | `NTFY_TOKEN_FILE` | `/run/secrets/ntfy_token` | `NTFY_TOKEN` |
 
 Rules:
 
@@ -359,7 +412,7 @@ services:
       RELEASE_DIGEST_LLM_BASE_URL: https://openrouter.ai/api/v1
       RELEASE_DIGEST_LLM_MODEL: anthropic/claude-haiku-5.5
       # No key env vars: both secrets are picked up from /run/secrets/ (§4.3).
-    secrets: [llm_api_key, github_token]
+    secrets: [llm_api_key, github_token, ntfy_token]
     volumes:
       - release-digest-data:/data
       - ./deploy:/config:ro
@@ -375,6 +428,8 @@ secrets:
     file: ./secrets/llm_api_key     # OpenRouter key; secrets/ is gitignored
   github_token:
     file: ./secrets/github_token
+  ntfy_token:
+    file: ./secrets/ntfy_token     # only if notify.ntfy is configured
 
 volumes:
   release-digest-data:
@@ -406,6 +461,8 @@ internal/notes/          resolve notes: body heuristics, changelog section extra
 internal/secret/         secret.String (redacting), *_FILE / /run/secrets / env resolution, SIGHUP reload
 internal/llm/            OpenAI-compatible client, response_format fallbacks, schema validation, retries
 internal/summarize/      prompt, cache key, pending-queue worker, publish_after fallback
+internal/advisory/       GHSA/CVE extraction from notes, GitHub advisory lookup + cache
+internal/notify/         urgency decision, ntfy client, outbox delivery + retries
 internal/feed/           RSS/Atom render + checks (ported from feed-me)
 internal/store/          SQLite + migrations
 internal/scheduler/      interval + jitter, single-flight passes (ported)
@@ -460,10 +517,22 @@ CREATE TABLE http_cache (url TEXT PRIMARY KEY, etag TEXT, body BLOB, fetched_at 
 CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_success_at INTEGER,
                          refused_private INTEGER NOT NULL DEFAULT 0, visibility_checked_at INTEGER,
                          scan_boundary TEXT,          -- newest tag of last completed scan (§3.1)
-                         scan_head TEXT, scan_next_page INTEGER,  -- in-progress catch-up
                          last_error TEXT DEFAULT '');
 CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- e.g. poll round-robin cursor
 CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at INTEGER);
+
+CREATE TABLE advisories (id TEXT PRIMARY KEY, severity TEXT, summary TEXT, json TEXT, fetched_at INTEGER);
+CREATE TABLE notifications (               -- outbox (§3.4); one row per release ever alerted
+  guid        TEXT PRIMARY KEY,            -- releases.guid: at-most-once
+  channel     TEXT NOT NULL,               -- ntfy
+  reason      TEXT NOT NULL,               -- advisory:GHSA-… | llm
+  payload     TEXT NOT NULL,
+  state       TEXT NOT NULL,               -- queued | sent | failed
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER,
+  created_at  INTEGER NOT NULL,
+  sent_at     INTEGER
+);
 ```
 
 ---
@@ -474,8 +543,8 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
   - pagination and catch-up past page 1
   - 304s and rate-limit headers, including an early stop and cursor resume
   - repos with no releases and repos with draft releases
-  - a catch-up interrupted on page 3, then resumed after a restart from page 2 with new releases arriving at the top mid-scan, ending with the boundary advanced exactly once
-  - a catch-up that needs 3 ticks' budgets, making progress every tick
+  - a catch-up interrupted on page 3 writes nothing. Between ticks, new releases are added at the top and more than 30 earlier entries are deleted. The retried scan then finds every remaining entry within the cap, and the boundary advances exactly once.
+  - a poll stage whose budget runs out mid-catch-up still finishes the repo it's on
   - private repos being refused, a visibility check that errors (fail-closed: no content requests), the token guard rejecting a `repo`-scoped token, and SIGHUP with a bad replacement token keeping the old one
   - deletion detection: a release that ages off page 1 is **not** a window candidate but is caught by the rotating sweep, an empty page 1, a candidate with a 404 is marked, a candidate whose check errors or hits a rate limit is left alone, and 10 always-failing items don't starve the rest of the sweep
 - **version:** table tests of classification and predecessor selection:
@@ -487,6 +556,13 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
 - **llm:** a fake OpenAI-compatible server that exercises the `json_schema` → `json_object` → prompt-only fallback, malformed JSON with a repair retry, 429 backoff and timeouts.
 - **summarize:** the cache key differs when only the repo, version, `prev_tag` or `prompt_file` *contents* differ, and matches for byte-identical requests. Also the state machine: `pending` → `fallback` at render time even while the LLM is down, `fallback` → `summarized` after the LLM recovers across a restart, keeping the GUID and pubDate. `next_attempt_at` backoff is persisted.
 - **scheduler:** with a fake GitHub that hangs and a fake LLM that fails, the tick still renders, expired fallbacks are published, and the next tick resumes polling at the cursor. With a fake GitHub that always uses all of `poll_budget`, summaries still complete every tick.
+- **notify:**
+  - The advisory signal fires without the LLM, and a `high` advisory isn't downgraded by an LLM `none`.
+  - LLM `urgent` with no security keyword in the notes is downgraded.
+  - Backfill, too-old and pre-release items are suppressed.
+  - A `fallback` item that turns urgent later alerts exactly once.
+  - `resummarize` and restarts never re-send.
+  - Against a fake ntfy server: correct headers and Bearer auth, 5xx retry, then `failed` after 24h.
 - **identity:** a `fallback` → `summarized` upgrade, a `fallback` → `no_notes` transition and a `no_notes` → `fallback` transition keep the GUID, the pubDate and feed membership, and advance Atom `<updated>`.
 - **secret:** a table test of the lookup order, both `X` and `X_FILE` set is an error, trailing-newline trimming, missing or empty files, and redaction under `fmt` `%v`/`%+v`/`%#v`, `slog` and `json.Marshal`. A test also asserts that an LLM 401 error message doesn't contain the key.
 - **feed:** golden RSS/Atom files, local spec checks, and `make validate` against W3C (not in every CI run).
@@ -497,10 +573,11 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
 ## 10. Milestones
 
 1. **Skeleton.** Copy in feed-me's config loading, store, feed, scheduler, server and Dockerfile, renamed. Add the secret loader (§4.3) and UUIDv5 GUIDs (§5). `run` serves an empty valid feed, and a golden test confirms the Atom IDs are well-formed `urn:uuid:` values.
-2. **GitHub poll.** Token guard, per-poll public check, releases, tags, version classification, predecessor selection, filtering, backfill, resumable catch-up, deletion detection (window + sweep), ETag cache, rate-limit pacing and stage budgets. Releases go through the `pending` → `fallback` path (§3.3), so items appear with raw-note excerpts and get upgraded automatically in milestone 4.
+2. **GitHub poll.** Token guard, per-poll public check, releases, tags, version classification, predecessor selection, filtering, backfill, atomic catch-up, deletion detection (window + sweep), ETag cache, rate-limit pacing and stage budgets. Releases go through the `pending` → `fallback` path (§3.3), so items appear with raw-note excerpts and get upgraded automatically in milestone 4.
 3. **Notes resolution.** Changelog section extraction, compare fallback, truncation.
 4. **LLM summaries.** Client, schema, fallbacks, cache, `summarize` dry-run command, rendered item format.
-5. **Hardening.** `config lint`, `resummarize`, deleted-release handling, W3C validation, compose with the Ollama profile, README.
+5. **Security alerts.** Summary schema urgency fields, GHSA/CVE extraction and advisory lookup, the ntfy outbox and client, the `notify test` command, and the feed's `🚨` marking.
+6. **Hardening.** `config lint`, `resummarize`, deleted-release handling, W3C validation, compose with the Ollama profile, README.
 
 Milestone 2 alone is already a useful aggregated releases feed, which makes it a natural checkpoint.
 
@@ -517,8 +594,9 @@ Milestone 2 alone is already a useful aggregated releases feed, which makes it a
 - Project name `release-digest`, a Go module, living in `~/dev/release-digest`.
 - Secrets are supported through Docker secrets: `*_FILE` env vars and `/run/secrets/<name>` defaults, with plain env for dev. Exactly one source may be present, otherwise it's a startup error. Secrets in YAML are rejected. OpenRouter is the documented default LLM endpoint.
 - **Public repositories only** in v1. Enforcement is a fail-closed visibility check on every poll. The token guard is best-effort defense in depth, since GitHub can't prove a token is public-only (§3.1).
-- After the third roborev review: the token-guard claims are scoped honestly and re-checked on SIGHUP, catch-up resumes mid-scan with a one-page overlap, `fallback` → `no_notes` is allowed, and the deletion sweep orders by attempt time.
-- After the second roborev review: published items are never hidden by state transitions, fallbacks have no age cutoff, catch-up is resumable through a persisted scan boundary, deletion checks rotate across all published items, poll and summarize have separate budgets, and `content_updated_at` drives Atom `<updated>`.
+- After the third and fourth roborev reviews: the token-guard claims are scoped honestly and re-checked on SIGHUP, `fallback` → `no_notes` is allowed and listed in §1, the deletion sweep orders by attempt time, and catch-up is **atomic** (buffered, committed only on completion, budget checked only between repos). That replaces the resumable-checkpoint design, which could stall or skip entries.
+- **Urgent security alerts via ntfy** (§3.4): a deterministic GHSA/CVE advisory signal plus a narrowly defined LLM signal, delivered at most once per release through an outbox. Alerts are suppressed for backfill, old releases and pre-releases.
+- After the second roborev review: published items are never hidden by state transitions, fallbacks have no age cutoff, deletion checks rotate across all published items, poll and summarize have separate budgets, and `content_updated_at` drives Atom `<updated>`.
 - After the first roborev review: the summary cache is keyed on the full canonical request, there's an explicit release state machine with fallback retries, deletions need a confirmed 404, tag pre-releases and predecessors are classified within a stream, scheduler passes are bounded and fair, and GUIDs are UUIDv5.
 
 ## 12. Open questions
@@ -528,3 +606,4 @@ Milestone 2 alone is already a useful aggregated releases feed, which makes it a
 3. **Which OpenRouter model** should be the example default? `anthropic/claude-haiku-5.5` is a placeholder. Pick whichever slug you'll actually run. This only affects docs and examples.
 4. **Should one GitHub release that bundles several packages** be split per package? Monorepos like `aws-sdk-go-v2` tag dozens of modules at once. In v1, stream prefixes (§3.1.1) keep predecessors correct, and `tag_pattern` picks which streams to follow. Splitting one release *body* across packages is deferred.
 5. **Should there be per-repo feeds later?** The GUID and categories already allow it, and it would be a renderer-only change.
+6. **Should security alerts get a daily "advisory" digest too?** In v1, only `urgent` releases push to ntfy. `advisory`-level items are visible in the feed only.

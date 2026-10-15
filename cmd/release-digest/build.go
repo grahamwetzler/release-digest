@@ -23,7 +23,10 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	defer e.store.Close()
-	e.tick(ctx, nil)
+	if err := e.tick(ctx, nil); err != nil {
+		fmt.Fprintf(stderr, "release-digest: %v\n", err)
+		return 1
+	}
 	n, err := e.store.FeedReleases(ctx, e.cfg.Feed.MaxItems, time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)

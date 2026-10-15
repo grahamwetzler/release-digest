@@ -11,6 +11,9 @@ import (
 	"release-digest/internal/render"
 )
 
+// validateW3C is replaceable in tests, which must not reach the network.
+var validateW3C = feed.ValidateW3C
+
 // cmdValidate checks the stored feed offline and, with --w3c, with the W3C
 // Feed Validation Service. Run it after `build`, not on every commit.
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
@@ -50,7 +53,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		if !*w3c {
 			continue
 		}
-		res, err := feed.ValidateW3C(ctx, hc, generator(), r.Bytes)
+		res, err := validateW3C(ctx, hc, generator(), r.Bytes)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", f.Path, err)
 			failed = true
@@ -60,9 +63,14 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		for _, m := range bad {
 			fmt.Fprintf(stderr, "%s: W3C %s\n", f.Path, m)
 		}
-		if len(bad) > 0 {
+		switch {
+		case !res.Valid:
+			// The verdict wins even when no message explains it.
+			fmt.Fprintf(stderr, "%s: W3C validator says the feed is not valid\n", f.Path)
 			failed = true
-		} else {
+		case len(bad) > 0:
+			failed = true
+		default:
 			fmt.Fprintf(stdout, "%s: ok (W3C)\n", f.Path)
 		}
 	}

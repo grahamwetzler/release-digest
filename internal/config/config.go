@@ -100,6 +100,8 @@ type Repo struct {
 	RepoOptions `yaml:",inline"`
 
 	FromEnv bool `yaml:"-"` // listed only in RELEASE_DIGEST_REPOS
+
+	invalid bool // a null entry, already reported; skipped by validation
 }
 
 // Defaults (§4.2).

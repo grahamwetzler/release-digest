@@ -110,13 +110,15 @@ func Build(ctx context.Context, st *store.Store, c *config.Config, generator str
 
 // Publish renders every format and stores it. Modified moves only when a
 // feed's bytes change, so Last-Modified survives restarts and no-op ticks.
-// On error nothing is stored and the last good feed keeps being served.
+// Every changed format is stored in one transaction: on error nothing is
+// stored and the last good feed keeps being served.
 func Publish(ctx context.Context, st *store.Store, c *config.Config, generator string, now time.Time) (map[string]*store.Rendered, error) {
 	built, err := Build(ctx, st, c, generator, now)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]*store.Rendered{}
+	changed := map[string]*store.Rendered{}
 	for path, data := range built {
 		sum := sha256.Sum256(data)
 		r := &store.Rendered{Bytes: data, ETag: `"` + hex.EncodeToString(sum[:16]) + `"`, Modified: now.UTC()}
@@ -128,10 +130,11 @@ func Publish(ctx context.Context, st *store.Store, c *config.Config, generator s
 			out[path] = prev
 			continue
 		}
-		if err := st.PutRendered(ctx, path, r); err != nil {
-			return nil, err
-		}
+		changed[path] = r
 		out[path] = r
+	}
+	if err := st.PutRenderedAll(ctx, changed); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

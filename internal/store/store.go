@@ -327,6 +327,24 @@ func (s *Store) PutRendered(ctx context.Context, path string, r *Rendered) error
 	return err
 }
 
+// PutRenderedAll replaces every given feed in one transaction, so a failed
+// write never leaves one format new and another old.
+func (s *Store) PutRenderedAll(ctx context.Context, feeds map[string]*Rendered) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for path, r := range feeds {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO rendered (path, bytes, etag, modified_at) VALUES (?, ?, ?, ?)
+			ON CONFLICT (path) DO UPDATE SET bytes = excluded.bytes, etag = excluded.etag, modified_at = excluded.modified_at`,
+			path, r.Bytes, r.ETag, toMS(r.Modified)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // State returns a scheduler_state value, or "" if unset.
 func (s *Store) State(ctx context.Context, key string) (string, error) {
 	var v string

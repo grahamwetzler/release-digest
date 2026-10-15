@@ -191,6 +191,20 @@ repos:
 	}
 }
 
+func TestNullRepoEntry(t *testing.T) {
+	_, err := Load(write(t, minimal+"repos:\n  - repo: o/r\n  -\n"), envOf(map[string]string{EnvRepos: "a/b"}))
+	if err == nil || !strings.Contains(err.Error(), ":5: repos[1]: must be a mapping with a repo key") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Count(err.Error(), "\n") != 0 {
+		t.Errorf("more than one error reported:\n%v", err)
+	}
+	_, err = Load(write(t, minimal+"repos: [null]\n"), envOf(nil))
+	if err == nil || !strings.Contains(err.Error(), "repos[0]: must be a mapping") {
+		t.Errorf("flow-style null: %v", err)
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	for in, want := range map[string]time.Duration{"7d": 7 * 24 * time.Hour, "90s": 90 * time.Second, "1h30m": 90 * time.Minute} {
 		if got, err := ParseDuration(in); err != nil || got != want {

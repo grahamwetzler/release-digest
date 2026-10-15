@@ -31,19 +31,22 @@ const (
 const stateLastTick = "last_tick"
 
 // tick runs one scheduler pass. In milestone 1 that is only the render;
-// poll and summarize slot in before it (§3).
-func (e *env) tick(ctx context.Context, srv *server.Server) {
+// poll and summarize slot in before it (§3). last_tick is recorded only
+// after a successful pass, so a restart after a failed one retries at once.
+func (e *env) tick(ctx context.Context, srv *server.Server) error {
 	start := time.Now()
 	feeds, err := render.Publish(ctx, e.store, e.cfg, generator(), start)
 	if err != nil {
-		e.log.Error("render failed; still serving the last good feed", "err", err)
-	} else if srv != nil {
+		return fmt.Errorf("render: %w", err)
+	}
+	if srv != nil {
 		srv.Set(feeds)
 	}
 	if err := e.store.SetStateTime(ctx, stateLastTick, start); err != nil {
-		e.log.Error("recording the tick", "err", err)
+		return fmt.Errorf("recording the tick: %w", err)
 	}
 	e.log.Info("tick done", "took", time.Since(start).Round(time.Millisecond))
+	return nil
 }
 
 // cmdRun is the long-running mode: the scheduler plus the HTTP server.
@@ -93,7 +96,11 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		Interval: c.Schedule.Interval.D,
 		Jitter:   c.Schedule.Jitter.D,
 		LastTick: func(ctx context.Context) (time.Time, error) { return e.store.StateTime(ctx, stateLastTick) },
-		Tick:     func(context.Context) { e.tick(tickCtx, srv) },
+		Tick: func(context.Context) {
+			if err := e.tick(tickCtx, srv); err != nil {
+				e.log.Error("tick failed; still serving the last good feed", "err", err)
+			}
+		},
 	}
 	scheduled := make(chan error, 1)
 	go func() { scheduled <- sched.Loop(ctx) }()

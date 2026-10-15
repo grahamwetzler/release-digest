@@ -66,6 +66,12 @@ func Load(path string, env LookupEnv) (*Config, error) {
 		return nil, errs
 	}
 	v := &validator{file: path, root: root, errs: errs}
+	for i, r := range c.Repos {
+		if r == nil { // e.g. "repos: [null]" or a bare "-"
+			v.err(p("repos", i), "must be a mapping with a repo key, got an empty entry")
+			c.Repos[i] = &Repo{invalid: true}
+		}
+	}
 	v.applyEnv(c, env)
 	v.validate(c, filepath.Dir(path))
 	if len(v.errs) > 0 {
@@ -336,7 +342,9 @@ var repoName = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-
 func (v *validator) mergeEnvRepos(c *Config, list string) {
 	seen := map[string]bool{}
 	for _, r := range c.Repos {
-		seen[strings.ToLower(r.Repo)] = true
+		if !r.invalid {
+			seen[strings.ToLower(r.Repo)] = true
+		}
 	}
 	for _, f := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' }) {
 		f = strings.TrimSpace(f)
@@ -456,6 +464,9 @@ func (v *validator) validate(c *Config, dir string) {
 	v.defaults(&c.Defaults)
 	seen := map[string]int{}
 	for i, r := range c.Repos {
+		if r.invalid {
+			continue
+		}
 		at := p("repos", i)
 		if r.FromEnv {
 			at = nil // positioned at the env var, already validated there

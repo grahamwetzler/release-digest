@@ -102,3 +102,26 @@ func TestRenderedAndState(t *testing.T) {
 		t.Errorf("unset state time = %v, %v", got, err)
 	}
 }
+
+func TestPutRenderedAllIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s, _ := open(t)
+	at := time.Date(2026, 10, 15, 1, 0, 0, 0, time.UTC)
+	old := &Rendered{Bytes: []byte("old"), ETag: `"o"`, Modified: at}
+	if err := s.PutRenderedAll(ctx, map[string]*Rendered{"feed.xml": old, "feed.atom": old}); err != nil {
+		t.Fatal(err)
+	}
+	// A nil Bytes violates NOT NULL, so the second write in the batch fails.
+	err := s.PutRenderedAll(ctx, map[string]*Rendered{
+		"feed.xml":  {Bytes: []byte("new"), ETag: `"n"`, Modified: at},
+		"feed.atom": {Bytes: nil, ETag: `"n"`, Modified: at},
+	})
+	if err == nil {
+		t.Fatal("expected the batch to fail")
+	}
+	for _, path := range []string{"feed.xml", "feed.atom"} {
+		if r, _ := s.Rendered(ctx, path); string(r.Bytes) != "old" {
+			t.Errorf("%s = %q after a failed batch, want old", path, r.Bytes)
+		}
+	}
+}

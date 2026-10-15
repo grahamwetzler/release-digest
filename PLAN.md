@@ -76,7 +76,14 @@ For each repo:
 
 0. **Public check, every poll, fail-closed.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` **before every poll** of that repo. When authenticated, an unchanged repo is a 304 and costs no rate limit. The repo is fetched only if this tick's response (or its validated 304) says `private: false`. If the response says `private: true`, or the check fails for any reason (error, timeout, rate limit), nothing else is fetched for that repo this tick.
    - On `private: true`, the repo is marked refused in `repo_state` and an error is logged. Its `pending` rows move to `skipped`. `config lint` fails on it.
-   - **Processing gate.** Any step that reads or sends a repo's content runs only if that repo passed its public check **in the current tick** (`visibility_checked_at ≥ tick start`, not refused). That covers notes resolution, summarization, advisory lookups, metadata and existence checks, and alert decisions. A repo that's refused, or whose check failed or was skipped this tick, has **every** row frozen, including published `fallback` and `no_notes` items: they stay in the feed exactly as they are, and none of their notes reach the LLM. The summarize stage enforces the gate by selecting work only from repos that passed in this tick.
+   - **Processing gate.** The gate has two levels. Each lists exactly which paths it stops.
+
+     | Repo condition | Stopped | Still allowed |
+     |---|---|---|
+     | **Unverified this tick** (check failed or was skipped, not refused) | Every *new* content operation: GitHub content fetches, notes resolution, LLM calls, advisory lookups, metadata and existence checks, and new alert decisions | Render-time `pending` → `fallback` promotion and outbox delivery of alerts that are already queued. Both use only content fetched and decided while the repo was confirmed public, so a transient GitHub error doesn't delay publication or an urgent alert |
+     | **Refused** (confirmed `private: true`) | All of the above, **plus** render promotion (its `pending` rows are already `skipped`) and outbox delivery: queued alerts for the repo are cancelled (`state = cancelled`) | Nothing changes for already-published items. They stay in the feed exactly as they are |
+
+     The summarize stage enforces the first level by selecting work only from repos that passed in this tick. Render and the outbox worker check `refused_private` before acting.
    - A repo that turns private keeps its already-published items, since they were public when fetched.
 1. `GET /repos/{owner}/{repo}/releases?per_page=30` (page 1) with `If-None-Match`. When authenticated, a 304 doesn't count against the rate limit.
 2. If the repo has **no releases** (or `sources: [tags]` is set), call `GET /repos/{owner}/{repo}/tags?per_page=30`. New tag rows are inserted with `published_at` unset. Their commit dates are resolved afterwards from a persisted **metadata queue**: `GET /repos/{owner}/{repo}/commits/{sha}`, cached forever, drained within the poll budget, at most 30 per tick. A tag row isn't eligible for summarizing or rendering until its date is resolved, and the date is frozen once set. Deletion existence checks (below) are a separate bounded queue too. So the atomic list fetch is only list requests.
@@ -94,7 +101,7 @@ For each repo:
 4. Classify each version (§3.1.1). Then filter by `include_prereleases`, by drafts (always excluded) and by the optional `tag_pattern` / `exclude_pattern` regexes, such as skipping `nightly-*`. Filtered versions are recorded as `skipped`, which keeps them available for predecessor selection (§3.2.1).
 5. Insert each unseen, unfiltered version as a `release` row in state `pending`. Every row records its **`origin`** in the same transaction: `live` (normal page-1 discovery), `backfill` (first sight), `catchup` or `reconcile`. Alerting (§3.4) relies on it. `origin` is part of milestone 2's schema, so rows predating alerting are already classified.
 
-**First sight of a repo:** only page 1 is read, and only its newest `backfill` versions are queued (default 3). The rest of page 1 is recorded as `skipped` so they're never summarized but can serve as predecessors. That keeps the LLM bill for adding a repo predictable. `repo_state.initialized_at` is set only after this completes without error. An interrupted first poll is redone from scratch, not treated as initialized.
+**First sight of a repo:** only page 1 is read, and only its newest `backfill` versions are queued (default 3). The rest of page 1 is recorded as `skipped` so they're never summarized but can serve as predecessors. That keeps the LLM bill for adding a repo predictable. `repo_state.initialized_at` is set to the first successful scan's **start time** (captured before page 1 is requested), and only once that scan completes without error. A release published during the scan therefore counts as after initialization. An interrupted first poll is redone from scratch, not treated as initialized.
 
 **Where public-only is actually enforced.** The guarantee rests on the per-poll visibility check above, **not** on the token. GitHub reports `private: true` for a private repo whatever the token's permissions, so a private repo is refused before any of its content is requested.
 
@@ -220,7 +227,7 @@ When a new release fixes a serious security issue, the feed item alone is too ea
      2. **Explicit:** one of the repo's configured `packages` (`{ecosystem, name}` pairs, e.g. `{ecosystem: go, name: github.com/foo/bar/v2}` or `{ecosystem: npm, name: "@foo/core"}`) appears in the advisory's `vulnerabilities[].package`. This covers packages whose name differs from the repo, and monorepos, where `packages` can be set per stream (§3.1.1).
      3. **Neither:** the advisory doesn't fire the signal. It's logged once as "unmatched advisory", and the LLM signal can still fire.
    - **Advisory caching:** advisories are cached in `advisories` with a `fetched_at`.
-     - A found advisory is refreshed every 24h while any release referencing it is within `max_age`. After that it's refreshed **weekly** for as long as a release whose `urgency_source` names it is still visible in the feed. Severity changes and `withdrawn_at` are picked up that way, and a withdrawn advisory stops counting.
+     - A found advisory is refreshed every 24h while any release referencing it is within `max_age`. After that it's refreshed **weekly** for as long as any release linked to it through `release_advisories` is still visible in the feed, **whatever that release's current urgency**. An advisory first seen below the threshold can therefore still escalate a visible release when its severity is raised later. Severity changes and `withdrawn_at` are picked up that way, and a withdrawn advisory stops counting.
      - `max_age` limits only **new notifications**. It doesn't limit refresh or how the feed is marked. A withdrawal after `max_age` still clears the marking (with a content change, §1).
      - A not-found advisory (a brand-new GHSA not yet in the global database) is retried after 1h.
      - Transient errors back off from 5m to a 1h cap.
@@ -577,7 +584,7 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   channel     TEXT NOT NULL,               -- ntfy
   reason      TEXT NOT NULL,               -- advisory:GHSA-… | llm
   payload     TEXT NOT NULL,
-  state       TEXT NOT NULL,               -- queued | sent | expired
+  state       TEXT NOT NULL,               -- queued | sent | expired | cancelled
   attempts    INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER,
   created_at  INTEGER NOT NULL,
@@ -595,7 +602,7 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - repos with no releases and repos with draft releases
   - a catch-up interrupted on page 3 writes nothing. Between ticks, new releases are added at the top and more than 30 earlier entries are deleted. The retried scan then finds every remaining entry within the cap, and the boundary advances exactly once.
   - a poll stage whose budget runs out mid-catch-up still finishes the repo it's on
-  - private repos being refused, a visibility check that errors (fail-closed: no content requests, and the repo's `fallback` rows aren't sent to the LLM that tick), the token guard rejecting a `repo`-scoped token, and SIGHUP with a bad replacement token keeping the old one
+  - private repos being refused (queued alerts cancelled, no render promotion), a visibility check that errors (fail-closed: no content requests and no LLM calls for any of the repo's rows that tick, while an aged `pending` row is still promoted and an already-queued alert is still delivered), the token guard rejecting a `repo`-scoped token, and SIGHUP with a bad replacement token keeping the old one
   - deletion detection: a release that ages off page 1 is **not** a window candidate but is caught by the rotating sweep, an empty page 1, a candidate with a 404 is marked, a candidate whose check errors or hits a rate limit is left alone, and 10 always-failing items don't starve the rest of the sweep
 - **version:** table tests of classification and predecessor selection:
   - `v2.0.0-rc.1`, `go1.28rc1`, `1.0.0beta2`, `service/api/v1.4.0`, `latest`
@@ -619,7 +626,8 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - Advisories: a not-found advisory appears an hour later and the release becomes urgent after it's already `summarized`; severity is upgraded on refresh; a withdrawn advisory removes the marking.
   - A delayed summary across a restart respects `origin` (a backfill row never alerts).
   - An urgency change advances `content_updated_at` without changing identity.
-  - An advisory withdrawn 30 days after release still clears the marking via the weekly refresh.
+  - An advisory withdrawn 30 days after release still clears the marking via the weekly refresh. An advisory first seen as `medium` and raised to `critical` 10 days later marks the still-visible release urgent but sends no alert, because it's past `max_age`.
+  - A release published while a repo's first scan is in flight, found later by reconciliation, is `pending`, not `skipped`.
 - **identity:** a `fallback` → `summarized` upgrade, a `fallback` → `no_notes` transition and a `no_notes` → `fallback` transition keep the GUID, the pubDate and feed membership, and advance Atom `<updated>`.
 - **secret:** a table test of the lookup order, both `X` and `X_FILE` set is an error, trailing-newline trimming, missing or empty files, and redaction under `fmt` `%v`/`%+v`/`%#v`, `slog` and `json.Marshal`. A test also asserts that an LLM 401 error message doesn't contain the key.
 - **feed:** golden RSS/Atom files, local spec checks, and `make validate` against W3C (not in every CI run).
@@ -653,7 +661,7 @@ Milestone 2 alone is already a useful aggregated releases feed, which makes it a
 - **Public repositories only** in v1. Enforcement is a fail-closed visibility check on every poll. The token guard is best-effort defense in depth, since GitHub can't prove a token is public-only (§3.1).
 - After the third and fourth roborev reviews: the token-guard claims are scoped honestly and re-checked on SIGHUP, `fallback` → `no_notes` is allowed and listed in §1, the deletion sweep orders by attempt time, and catch-up is **atomic** (buffered, committed only on completion, budget checked only between repos). That replaces the resumable-checkpoint design, which could stall or skip entries.
 - After the fifth roborev review: ntfy delivery is explicitly at-least-once from a separate outbox worker; advisories are matched to repos by `source_code_location` or configured `packages` and refreshed on a TTL; urgency is stored apart from summary state; alert bodies have a byte budget; every row records its discovery `origin`; daily reconciliation repairs pagination shifts during a scan; tag metadata and deletion checks run from bounded queues; and the ntfy secret moves to the compose override.
-- **Urgent security alerts via ntfy** (§3.4): a deterministic GHSA/CVE advisory signal plus a narrowly defined LLM signal, delivered at most once per release through an outbox. Alerts are suppressed for backfill, old releases and pre-releases.
+- **Urgent security alerts via ntfy** (§3.4): a deterministic GHSA/CVE advisory signal plus a narrowly defined LLM signal, **enqueued once** per release and **delivered at least once within the alert window** (`max_age`), so a duplicate is possible after an ambiguous POST. Alerts are suppressed for backfill, old releases and pre-releases.
 - After the second roborev review: published items are never hidden by state transitions, fallbacks have no age cutoff, deletion checks rotate across all published items, poll and summarize have separate budgets, and `content_updated_at` drives Atom `<updated>`.
 - After the first roborev review: the summary cache is keyed on the full canonical request, there's an explicit release state machine with fallback retries, deletions need a confirmed 404, tag pre-releases and predecessors are classified within a stream, scheduler passes are bounded and fair, and GUIDs are UUIDv5.
 

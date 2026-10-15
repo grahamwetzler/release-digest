@@ -64,8 +64,8 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 
 **Bounded passes:** no single slow repo or flaky upstream can stall the feed.
 
-- **Each stage has its own budget**, so neither can starve the other: `schedule.poll_budget` (default 7m) and `schedule.summarize_budget` (default 7m). A stage that hits its budget stops, and its unfinished work stays persisted for the next tick. The summarize stage always runs after poll, whatever poll's outcome, so the LLM makes progress even if GitHub eats its full allowance every tick. Render runs outside both budgets. Every GitHub and LLM request has its own timeout (`github.request_timeout`, default 20s; `llm.timeout`). Budgets are checked between units of work, so the maximum overrun is one unit: for poll, one repo's list fetch, at most (2 + `max_pages`) × 20s ≈ 2m20s worst case.
-- **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback` (§3.3), so fallback publication never waits on GitHub or the LLM.
+- **Each stage has its own budget**, so neither can starve the other: `schedule.poll_budget` (default 7m) and `schedule.summarize_budget` (default 7m). A stage that hits its budget stops, and its unfinished work stays persisted for the next tick. The summarize stage always runs after poll, whatever poll's outcome, so the LLM makes progress even if GitHub eats its full allowance every tick. Render runs outside both budgets. Every GitHub and LLM request has its own timeout (`github.request_timeout`, default 20s; `llm.timeout`). Budgets are checked between units of work, so the maximum overrun is one unit. For poll, the largest unit is one repo's visibility check plus its atomic catch-up scan: at most (1 + `max_pages`) × `request_timeout` = 2m worst case. Reconciliation, metadata and existence checks are checked page by page or item by item, so each adds at most one request.
+- **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback` (§3.3), so fallback publication never waits on the LLM. It does wait for a fresh public confirmation of the repo (§3.1, processing gate).
 - Render also runs after every 5 completed summaries, so a long summarize pass publishes as it goes.
 
 **Fairness:** repos are polled round-robin from a persisted cursor, so a pass cut short by the budget or a rate limit picks up where it stopped. Summaries are taken oldest `first_seen_at` first, at most `llm.max_per_pass` (default 20) per pass.
@@ -75,16 +75,17 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 For each repo:
 
 0. **Public check, every poll, fail-closed.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` **before every poll** of that repo. When authenticated, an unchanged repo is a 304 and costs no rate limit. The repo is fetched only if this tick's response (or its validated 304) says `private: false`. If the response says `private: true`, or the check fails for any reason (error, timeout, rate limit), nothing else is fetched for that repo this tick.
-   - On `private: true`, the repo is marked refused in `repo_state` and an error is logged. Its `pending` rows move to `skipped`. `config lint` fails on it.
-   - **Processing gate.** The gate has two levels. Each lists exactly which paths it stops.
+   - On `private: true` **or a 404** (a repo that's gone private looks like a 404 to a token without access), the repo is marked **held** in `repo_state` and an error is logged. `config lint` fails on it. Holding is **not terminal**: rows keep their state, and nothing is moved to `skipped` or cancelled.
+   - **Processing gate (strict).** Any action that would newly expose a repo's content requires a **fresh public confirmation**: the repo's most recent visibility check succeeded with `private: false`, and it's no older than `schedule.interval + jitter` (in other words, from the latest tick). That covers:
+     - GitHub content fetches, notes resolution, LLM calls, advisory lookups, metadata and existence checks
+     - new alert decisions
+     - render-time `pending` → `fallback` **promotion** (first publication)
+     - outbox **delivery**
 
-     | Repo condition | Stopped | Still allowed |
-     |---|---|---|
-     | **Unverified this tick** (check failed or was skipped, not refused) | Every *new* content operation: GitHub content fetches, notes resolution, LLM calls, advisory lookups, metadata and existence checks, and new alert decisions | Render-time `pending` → `fallback` promotion and outbox delivery of alerts that are already queued. Both use only content fetched and decided while the repo was confirmed public, so a transient GitHub error doesn't delay publication or an urgent alert |
-     | **Refused** (confirmed `private: true`) | All of the above, **plus** render promotion (its `pending` rows are already `skipped`) and outbox delivery: queued alerts for the repo are cancelled (`state = cancelled`) | Nothing changes for already-published items. They stay in the feed exactly as they are |
-
-     The summarize stage enforces the first level by selecting work only from repos that passed in this tick. Render and the outbox worker check `refused_private` before acting.
-   - A repo that turns private keeps its already-published items, since they were public when fetched.
+     The rule is the same whether the check failed, timed out, returned 404 or said private: no fresh confirmation, no exposure.
+   - **Trade-off.** A transient GitHub outage delays first publication and alerts until a check succeeds. That's preferred to risking disclosure of a repo that just went private.
+   - **Already-published items** stay in the feed exactly as they are, since they were public when published.
+   - **Recovery.** When a held repo passes a check again, it's simply un-held. Its `pending` rows resume, and queued alerts are delivered if still within `max_age`. Normal and daily scans pick up anything released meanwhile, because the scan boundary didn't advance while the repo was held.
 1. `GET /repos/{owner}/{repo}/releases?per_page=30` (page 1) with `If-None-Match`. When authenticated, a 304 doesn't count against the rate limit.
 2. If the repo has **no releases** (or `sources: [tags]` is set), call `GET /repos/{owner}/{repo}/tags?per_page=30`. New tag rows are inserted with `published_at` unset. Their commit dates are resolved afterwards from a persisted **metadata queue**: `GET /repos/{owner}/{repo}/commits/{sha}`, cached forever, drained within the poll budget, at most 30 per tick. A tag row isn't eligible for summarizing or rendering until its date is resolved, and the date is frozen once set. Deletion existence checks (below) are a separate bounded queue too. So the atomic list fetch is only list requests.
 3. **Catch-up pagination (atomic).** Each repo persists a **scan boundary**: the newest tag of its last completed scan, stored in `repo_state.scan_boundary`. If page 1 doesn't contain the boundary, which happens after downtime or a burst of releases, pages 2…`max_pages` (default 5) are fetched back-to-back until the boundary appears, the cap is reached, or the list ends.
@@ -94,16 +95,16 @@ For each repo:
    - Versions past the cap are **intentionally omitted**: never fetched, never recorded. A warning names the repo and the number of pages scanned.
    - **Shifts *during* a scan.** Pages aren't a snapshot. If entries are deleted between page requests, an unread entry can slide onto an already-read page and be missed. The scan doesn't try to detect this. The daily reconciliation below repairs it, within the stated bound.
 
-   **Daily reconciliation.** Once per day per repo, staggered by the round-robin cursor, a scan reads `reconcile_pages` pages (default `max_pages + 5` = 10, i.e. 300 entries) regardless of the boundary. This catches anything missed for any reason: shifts during a scan, bugs, or a repo that was misconfigured for a while. It's ordinary list traffic, mostly 304s.
+   **Daily reconciliation.** Once per day per repo, staggered by the round-robin cursor, a scan reads `reconcile_pages` pages (default `max_pages + 5` = 10, i.e. 300 entries) regardless of the boundary. This catches anything missed for any reason: shifts during a scan, bugs, or a repo that was misconfigured for a while. It's ordinary list traffic, mostly 304s. Reconciliation is **not atomic**: it only inserts missing rows, idempotently, and never moves the boundary. So it checks the poll budget **between pages**, persists `reconcile_next_page`, and resumes there next tick. Its contribution to the overrun bound is one page request.
 
 - **Classifying what it finds.** Any version it finds that isn't stored is inserted with `origin = reconcile`. It's `pending` only if **both** of these hold: it was published within `publish_window` (default 7d), and it was published **after the repo's `initialized_at`**. Otherwise it's `skipped`. Releases that predate tracking never become pending through reconciliation, however many there were, so the first-sight `backfill` limit holds.
 - **Coverage bound (accepted).** The extra 5 pages give a missed entry headroom. It's lost only if a deletion displaced it during a scan, **and** more than 150 newer releases landed before the next reconciliation (within a day). No realistic repo publishes 150 releases a day, and `exclude_pattern` handles nightly-tag firehoses. This bound is documented rather than engineered away: GitHub's list API has no cursor or snapshot, so no client-side scheme can fully close it.
 4. Classify each version (§3.1.1). Then filter by `include_prereleases`, by drafts (always excluded) and by the optional `tag_pattern` / `exclude_pattern` regexes, such as skipping `nightly-*`. Filtered versions are recorded as `skipped`, which keeps them available for predecessor selection (§3.2.1).
 5. Insert each unseen, unfiltered version as a `release` row in state `pending`. Every row records its **`origin`** in the same transaction: `live` (normal page-1 discovery), `backfill` (first sight), `catchup` or `reconcile`. Alerting (§3.4) relies on it. `origin` is part of milestone 2's schema, so rows predating alerting are already classified.
 
-**First sight of a repo:** only page 1 is read, and only its newest `backfill` versions are queued (default 3). The rest of page 1 is recorded as `skipped` so they're never summarized but can serve as predecessors. That keeps the LLM bill for adding a repo predictable. `repo_state.initialized_at` is set to the first successful scan's **start time** (captured before page 1 is requested), and only once that scan completes without error. A release published during the scan therefore counts as after initialization. An interrupted first poll is redone from scratch, not treated as initialized.
+**First sight of a repo:** only page 1 is read, and only its newest `backfill` versions are queued (default 3). The rest of page 1 is recorded as `skipped` so they're never summarized but can serve as predecessors. That keeps the LLM bill for adding a repo predictable. `repo_state.initialized_at` is set to the first successful scan's **start time** (captured before page 1 is requested), and only once that scan completes without error. A release on page 1 published **after the scan's start time** gets `origin = live`. It doesn't count toward the `backfill` quota and is alert-eligible like any normal discovery. Only releases published before the start are `backfill`/`skipped`. An interrupted first poll is redone from scratch, not treated as initialized.
 
-**Where public-only is actually enforced.** The guarantee rests on the per-poll visibility check above, **not** on the token. GitHub reports `private: true` for a private repo whatever the token's permissions, so a private repo is refused before any of its content is requested.
+**Where public-only is actually enforced.** The guarantee rests on the per-poll visibility check above, **not** on the token. GitHub reports `private: true` for a private repo whatever the token's permissions, so a private (or newly inaccessible) repo is held before any of its content is requested or exposed.
 
 The only residual exposure is a repo flipping to private in the seconds between its visibility check and its content requests within one poll. Content fetched in that window was public moments earlier. This is accepted and documented in the README.
 
@@ -236,7 +237,12 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 
    To limit false positives, `urgent` only counts if the item's `security` list is non-empty **and** the resolved notes contain a security keyword (`security`, `vulnerab`, `CVE-`, `GHSA-`, `exploit`). Otherwise it's downgraded to `advisory` and logged.
 
-**Urgency on the item.** `releases.urgency` (`none` / `advisory` / `urgent`) and `urgency_source` are stored separately from the summary state. The rendered marking (`🚨` title prefix, `security-urgent` category) follows `urgency`. Any change to it is a permitted content change (§1) and advances `content_updated_at`. Urgency only escalates, with one exception: when every advisory behind an `urgent` decision is withdrawn and there's no LLM signal, it drops back and the marking is removed. A sent alert is never retracted.
+**Urgency on the item.** `releases.urgency` (`none` / `advisory` / `urgent`) and `urgency_source` are stored separately from the summary state. The rendered marking (`🚨` title prefix, `security-urgent` category) follows `urgency`. Any change to it is a permitted content change (§1) and advances `content_updated_at`. Urgency is **recomputed** whenever an input changes: an advisory refresh, a new or updated LLM summary, or a `min_severity` config change. The result is the maximum of the two signals:
+
+- **Advisory signal:** fires if any linked advisory that isn't withdrawn meets `min_severity`.
+- **LLM signal:** the validated LLM urgency.
+
+So urgency can go **down** as well as up, for example when the only qualifying advisory is downgraded from high to medium or withdrawn and no LLM `urgent` remains. The marking follows, and the change advances `content_updated_at`. A sent alert is never retracted, and an alert can't be re-sent by the same release escalating again (it's enqueued once, keyed by GUID).
 
 **What gets sent.** One `POST {notify.ntfy.url}` per urgent release, where the URL is server plus topic:
 
@@ -264,8 +270,8 @@ Truncation happens at a rune boundary with `…`. The links are in headers (`Cli
 - **Timing:** it wakes every 30s, or immediately when a row is enqueued, and sends at most 10 per wake, each with a 10s request timeout. Dispatch latency after a decision is normally a few seconds.
 - **Enqueued once per release.** Rows are keyed by GUID, so `resummarize`, restarts and state transitions never enqueue twice.
 - **Delivery is at-least-once.** A row is marked `sent` only after a 2xx. If ntfy accepted the POST but the response was lost (timeout, connection reset, crash before the commit), the retry can deliver a **duplicate**. That's deliberate: for an urgent security alert, a rare duplicate beats a lost alert. The README documents it.
-- **Retries:** a failed or ambiguous delivery retries with backoff (1m → 1h cap) **until it succeeds or the release passes `notify.max_age`**. Then it's marked `expired`, logged at error level, and reported on `/healthz` as degraded until it's acknowledged with `release-digest notify ack`.
-- **Exact guarantee:** at-least-once delivery **within the alert window** (`max_age`, default 7d, from the release's pubDate). An ntfy outage longer than the window drops the alert, but never silently. A week-late "urgent" ping has little value, and the release is still marked in the feed.
+- **Retries:** a failed or ambiguous delivery retries with backoff (1m → 1h cap) **until it succeeds or the release passes `notify.max_age`**. The next attempt is scheduled at `min(now + backoff, expiry − 2m)`, so a backoff step can never jump past the window: there's always a final attempt just before expiry. Then it's marked `expired`, logged at error level, and reported on `/healthz` as degraded until it's acknowledged with `release-digest notify ack`.
+- **Exact guarantee:** the alert is delivered, possibly more than once, **if any attempt inside the alert window succeeds** (`max_age`, default 7d, from the release's pubDate). Attempts run at least hourly throughout the window, plus one just before expiry, and they're also held while the repo lacks fresh public confirmation (§3.1). An ntfy outage that covers every attempt drops the alert, but never silently. A week-late "urgent" ping has little value, and the release is still marked in the feed.
 - **Not on backfill.** Only releases with `origin = live` alert by default. `backfill`, `catchup` and `reconcile` rows don't, unless `notify.include_backfill: true`. `origin` is persisted at insert (§3.1), so this holds across restarts and delayed summaries. Neither do releases older than `notify.max_age` (default 7d) by pubDate. Adding a repo or restarting after downtime doesn't produce an alert storm.
 - **Pre-releases** alert only if `notify.include_prereleases: true`.
 - **Late detection still counts.** An item already published as `fallback` can turn urgent later when its LLM summary lands. It still alerts once, if it's within `max_age`.
@@ -570,8 +576,9 @@ CREATE TABLE summaries (
 
 CREATE TABLE http_cache (url TEXT PRIMARY KEY, etag TEXT, body BLOB, fetched_at INTEGER);
 CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_success_at INTEGER,
-                         refused_private INTEGER NOT NULL DEFAULT 0, visibility_checked_at INTEGER,
+                         held INTEGER NOT NULL DEFAULT 0, visibility_confirmed_at INTEGER,  -- last successful public check (§3.1)
                          scan_boundary TEXT,          -- newest tag of last completed scan (§3.1)
+                         reconcile_next_page INTEGER, last_reconciled_at INTEGER,
                          last_error TEXT DEFAULT '');
 CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- e.g. poll round-robin cursor
 CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at INTEGER);
@@ -584,7 +591,7 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   channel     TEXT NOT NULL,               -- ntfy
   reason      TEXT NOT NULL,               -- advisory:GHSA-… | llm
   payload     TEXT NOT NULL,
-  state       TEXT NOT NULL,               -- queued | sent | expired | cancelled
+  state       TEXT NOT NULL,               -- queued | sent | expired
   attempts    INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER,
   created_at  INTEGER NOT NULL,
@@ -602,7 +609,7 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - repos with no releases and repos with draft releases
   - a catch-up interrupted on page 3 writes nothing. Between ticks, new releases are added at the top and more than 30 earlier entries are deleted. The retried scan then finds every remaining entry within the cap, and the boundary advances exactly once.
   - a poll stage whose budget runs out mid-catch-up still finishes the repo it's on
-  - private repos being refused (queued alerts cancelled, no render promotion), a visibility check that errors (fail-closed: no content requests and no LLM calls for any of the repo's rows that tick, while an aged `pending` row is still promoted and an already-queued alert is still delivered), the token guard rejecting a `repo`-scoped token, and SIGHUP with a bad replacement token keeping the old one
+  - the gate: a repo that returns `private: true`, 404 or 5xx gets no content requests, LLM calls, render promotion or alert delivery, and its published items stay unchanged. When the repo is public again, held `pending` rows and queued alerts resume, and releases from the private period are discovered, the token guard rejecting a `repo`-scoped token, and SIGHUP with a bad replacement token keeping the old one
   - deletion detection: a release that ages off page 1 is **not** a window candidate but is caught by the rotating sweep, an empty page 1, a candidate with a 404 is marked, a candidate whose check errors or hits a rate limit is left alone, and 10 always-failing items don't starve the rest of the sweep
 - **version:** table tests of classification and predecessor selection:
   - `v2.0.0-rc.1`, `go1.28rc1`, `1.0.0beta2`, `service/api/v1.4.0`, `latest`
@@ -627,7 +634,10 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - A delayed summary across a restart respects `origin` (a backfill row never alerts).
   - An urgency change advances `content_updated_at` without changing identity.
   - An advisory withdrawn 30 days after release still clears the marking via the weekly refresh. An advisory first seen as `medium` and raised to `critical` 10 days later marks the still-visible release urgent but sends no alert, because it's past `max_age`.
-  - A release published while a repo's first scan is in flight, found later by reconciliation, is `pending`, not `skipped`.
+  - A release published while a repo's first scan is in flight is `origin = live` and alert-eligible, whether it's found by that scan or later by reconciliation.
+  - Urgency is downgraded when the only `high` advisory becomes `medium` and the marking is removed. A later re-escalation doesn't re-send the alert.
+  - An ntfy outage that ends 30m before expiry, while the backoff is at 1h, still delivers via the final pre-expiry attempt.
+  - A reconciliation interrupted by the budget resumes at `reconcile_next_page`.
 - **identity:** a `fallback` → `summarized` upgrade, a `fallback` → `no_notes` transition and a `no_notes` → `fallback` transition keep the GUID, the pubDate and feed membership, and advance Atom `<updated>`.
 - **secret:** a table test of the lookup order, both `X` and `X_FILE` set is an error, trailing-newline trimming, missing or empty files, and redaction under `fmt` `%v`/`%+v`/`%#v`, `slog` and `json.Marshal`. A test also asserts that an LLM 401 error message doesn't contain the key.
 - **feed:** golden RSS/Atom files, local spec checks, and `make validate` against W3C (not in every CI run).

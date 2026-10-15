@@ -234,9 +234,12 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 **This release must fix the advisory.** Mentioning an advisory isn't enough, since notes also cite unfixed or upstream CVEs. A matched advisory counts toward *this* release only on positive evidence that the release fixes it:
 
 1. **Version evidence (preferred).** For the matched package, the advisory's `vulnerabilities[]` entry has a `first_patched_version`. Parsed with the release's version scheme (§3.1.1), the release must be **≥ `first_patched_version`**, **and** its predecessor (`prev_tag`) must be **known** and fall inside `vulnerable_version_range`. In other words, this is the release that crossed from vulnerable to patched. If `prev_tag` is unknown (a repo's first tracked version, or a predecessor that can't be parsed), version evidence is **unavailable**, not satisfied, and only text evidence can apply.
-2. **Text evidence (fallback when version evidence is unavailable).** The advisory ID appears in the same bullet or line as a fix verb (`fix`, `patch`, `resolve`, `address`, `mitigate`), **and** that line contains no negation or hedge anywhere.
-   - Negations and hedges are matched case-insensitively as whole words: `not`, `no`, `never`, `don't`, `doesn't`, `won't`, `cannot`, `can't`, `without`, `unfixed`, `still`, `pending`, `upcoming`, `planned`, `known issue`, `upstream`, `workaround`.
-   - That rejects phrasing like "We do not fix CVE-…", "a fix is planned for GHSA-…" and "upstream patch for CVE-… pending".
+2. **Text evidence (fallback when version evidence is unavailable).** This is an **allowlist of affirmative forms**, then a **denylist**. Both must pass on the bullet or line containing the advisory ID.
+   - **Allowlist (required).** The line must take one of two forms. Anything else, including prose like "we will fix …", never qualifies, so new phrasings fail closed.
+     - It **starts**, after list markers and an optional `Security:`/`[security]` prefix, with an imperative or third-person fix verb, the usual changelog-entry form: `Fix`, `Fixes`, `Patch`, `Patches`, `Resolve`, `Resolves`, `Address`, `Addresses`, `Mitigate`, `Mitigates`. Examples: "Fix CVE-…", "- Fixes GHSA-… (#123)".
+     - It contains a **completed** form linked to the ID: `fixed`, `patched`, `resolved`, `addressed` or `mitigated`, as in "CVE-… is fixed" or "patched GHSA-…".
+   - **Denylist (still applied).** No whole-word, case-insensitive negation, hedge or future marker appears anywhere on the line: `not`, `no`, `never`, `don't`, `doesn't`, `won't`, `cannot`, `can't`, `without`, `unfixed`, `still`, `pending`, `upcoming`, `planned`, `will`, `would`, `should`, `going to`, `next`, `future`, `later`, `soon`, `known issue`, `upstream`, `workaround`.
+   - Together they reject phrasing like "We do not fix CVE-…", "We will fix CVE-… in the next release", "a fix is planned for GHSA-…" and "upstream patch for CVE-… pending".
    - The rule is **deliberately conservative**. A false negative only drops this signal, while the LLM signal and the feed marking remain. A false positive sends a wrong urgent alert, which is worse.
 3. **Neither.** The link is stored with `fixes = 0`. The advisory doesn't fire the signal and is logged.
 
@@ -268,10 +271,13 @@ Config inputs are fingerprinted, and the fingerprint is stored in `scheduler_sta
 
 - **At startup**, the recompute finishes before the outbox worker starts.
 - **On SIGHUP**, the worker is already running, so the two are synchronized by a **reload lock**. The worker holds the lock in shared mode from each claim through that row's final state. Reload takes it exclusively:
-  1. It stops new claims.
-  2. It waits for in-flight sends to finish, at most one request timeout (10s).
-  3. It recomputes and commits.
-  4. Only then does it release the lock.
+  1. It sets `reload_pending`, which stops new claims.
+  2. Rows that are claimed but haven't started their POST are **released**. The worker's pre-POST re-read also checks `reload_pending`. If it's set, the row goes straight back to `queued` (no backoff, no attempt counted) without sending.
+  3. It waits only for POSTs **already in flight**, at most one request timeout (10s).
+  4. It recomputes and commits. Released rows are re-evaluated like any queued row, so a now-stale one is cancelled.
+  5. It clears `reload_pending` and releases the lock.
+
+  The only alert that can go out stale is one whose POST had already begun before the SIGHUP. That's the same one-request window as other cancellation races, and it's logged.
 
 Either way, a queued alert that a config change made stale is cancelled before it can be claimed or sent.
 
@@ -719,8 +725,11 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
     - a row stuck in `sending` after a crash → re-queued at startup
   - Re-escalation by a different advisory rebuilds the payload.
   - De-escalation then re-escalation while a row is `sending`: on POST failure, the row is re-queued with the rebuilt payload, not cancelled.
-  - SIGHUP that changes `packages` while the worker holds a claim: reload waits for it, recomputes, and the stale queued alert for another release is cancelled before any further claim.
-  - Advisory fix evidence when `prev_tag` is unknown: a later release that only cites the advisory gets no version evidence and needs text evidence. "We do not fix CVE-…" and "fix planned for GHSA-…" yield `fixes = 0`.
+  - SIGHUP that changes `packages`:
+    - while the worker holds a claim that hasn't POSTed: the row is released to `queued` without sending, recomputed and cancelled
+    - while a POST is in flight: reload waits for it and logs it if the alert turned stale
+    - a stale queued alert for another release is cancelled before any further claim
+  - Advisory fix evidence when `prev_tag` is unknown: a later release that only cites the advisory gets no version evidence and needs text evidence. These all yield `fixes = 0`: "We do not fix CVE-…", "We will fix CVE-… in the next release", "fix planned for GHSA-…", and free prose without an allowlisted form ("this release is about CVE-…"). These yield `fixes = 1`: "- Fix CVE-… in parser", "Security: Fixes GHSA-…" and "CVE-… is patched".
   - The outbox delivers and retries between ticks using only its just-in-time check, including the final pre-expiry attempt.
   - Sweep rotation: 3 always-timing-out repos at the head of the list don't stop the others being confirmed within the stated number of ticks.
   - Editing a repo's `packages`, then SIGHUP, re-matches advisories and cancels a now-stale queued alert before the worker runs.

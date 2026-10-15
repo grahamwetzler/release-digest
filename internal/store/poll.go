@@ -194,12 +194,14 @@ func (s ops) Notes(ctx context.Context, hash string) (string, error) {
 	return text, err
 }
 
-// SetPendingNotes replaces the notes of a release that isn't visible yet,
-// for a release body edited after discovery. Visible rows are left alone:
-// their content changes only through the transitions in §3.3.
+// SetPendingNotes replaces the release-body notes of a release that isn't
+// visible yet, for a body edited after discovery (an empty source and hash
+// clear them). Visible rows are left alone: their content changes only
+// through the transitions in §3.3. Notes from another source are kept.
 func (s ops) SetPendingNotes(ctx context.Context, repo, tag, source, hash string) error {
 	_, err := s.q.ExecContext(ctx, `UPDATE releases SET notes_source = ?, notes_hash = ?
-		WHERE repo = ? AND tag = ? AND state = ?`, source, hash, repo, tag, StatePending)
+		WHERE repo = ? AND tag = ? AND state = ? AND notes_source IN ('', 'release_body')`,
+		source, hash, repo, tag, StatePending)
 	return err
 }
 

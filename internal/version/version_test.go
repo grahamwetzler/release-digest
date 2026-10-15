@@ -25,8 +25,8 @@ func TestParse(t *testing.T) {
 		{"v1.2.3+build.5", "", "1.2.3+build.5", false},
 		{"v1.2.3_final", "", "1.2.3+_final", false},
 		{"1.2.3.4.5", "", "1.2.3.4+.5", false},
-		{"latest", "latest", "", false},
-		{"stable", "stable", "", false},
+		{"latest", "", "", false}, // date-ordered tags share the empty stream
+		{"stable", "", "", false},
 	} {
 		v := Parse(tc.tag, nil)
 		if v.Stream != tc.stream || v.String() != tc.version || v.Prerelease != tc.pre {
@@ -96,14 +96,14 @@ func TestPredecessor(t *testing.T) {
 	}
 
 	dated := []Candidate{
-		{Tag: "latest", Stream: "latest", Published: day(1)},
-		{Tag: "build-a", Stream: "build-a", Published: day(2)},
-		{Tag: "snap", Stream: "snap", Published: day(3)},
-		{Tag: "snap-old", Stream: "snap", Published: day(2)},
-		{Tag: "snap-undated", Stream: "snap"},
+		cand("stable", day(1), false),
+		cand("latest", day(3), false),
+		cand("edge", day(2), false),
+		cand("v9.0.0", day(2), false), // parsed: never a date-ordered predecessor
+		cand("snap-undated", time.Time{}, false),
 	}
-	if got := Predecessor(dated[2], dated); got != "snap-old" {
-		t.Errorf("date-ordered predecessor = %q, want snap-old", got)
+	if got := Predecessor(dated[1], dated); got != "edge" {
+		t.Errorf("date-ordered predecessor = %q, want edge", got)
 	}
 	if got := Predecessor(dated[4], dated); got != "" {
 		t.Errorf("undated tag predecessor = %q, want none", got)

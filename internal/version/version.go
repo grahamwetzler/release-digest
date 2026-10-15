@@ -15,7 +15,7 @@ var DefaultPrerelease = regexp.MustCompile(`(?i)^[-.]?(alpha|beta|rc|pre|preview
 
 // Version is a classified tag.
 type Version struct {
-	Stream     string // everything before the version, e.g. "service/api/" or "go"; "v" is not part of it
+	Stream     string // everything before the version, e.g. "service/api/" or "go"; "v" is not part of it; "" if unparsed
 	Core       []int  // 1–4 numeric components; nil if the tag has none (date-ordered)
 	Pre        string // pre-release identifiers, e.g. "rc.1" or "beta2"; "" for a stable version
 	Suffix     string // any other trailing text that is not a pre-release marker
@@ -53,7 +53,9 @@ func Parse(tag string, pre *regexp.Regexp) Version {
 	}
 	start := versionStart(tag)
 	if start < 0 {
-		return Version{Stream: tag}
+		// Date-ordered: such tags (latest, stable…) share one stream, the
+		// empty one, and are ordered among themselves by date (§3.2.1).
+		return Version{}
 	}
 	v := Version{Stream: tag[:start]}
 	if n := len(v.Stream); n > 0 && (v.Stream[n-1] == 'v' || v.Stream[n-1] == 'V') && (n == 1 || !isLetter(v.Stream[n-2])) {

@@ -353,6 +353,7 @@ func (p *Poller) pollRepo(ctx context.Context, r *config.Repo, tick int64, b *bu
 	if err != nil || !ok {
 		return storeErr(err)
 	}
+	start := p.now() // before page 1: a release published during the request is live (§3.1)
 	var page1 []entry
 	if slices.Contains(r.Sources, "releases") {
 		if page1, err = p.releasesPage(ctx, r, 1); err != nil {
@@ -368,7 +369,7 @@ func (p *Poller) pollRepo(ctx context.Context, r *config.Repo, tick int64, b *bu
 		}
 		return p.windowChecks(ctx, r, modeTags, tags, true)
 	}
-	if err := p.scanReleases(ctx, r, page1); err != nil {
+	if err := p.scanReleases(ctx, r, page1, start); err != nil {
 		return err
 	}
 	if err := p.windowChecks(ctx, r, modeReleases, page1, false); err != nil {
@@ -394,13 +395,12 @@ func (p *Poller) finishScan(rs *store.RepoState, m mode, start time.Time) {
 	rs.LastSuccessAt, rs.LastError = p.now(), ""
 }
 
-// scanReleases takes page 1 of the releases list and, when the scan
+// scanReleases takes page 1 of the releases list, fetched at start, and, when the scan
 // boundary isn't on it, reads catch-up pages up to max_pages, then commits
 // everything in one transaction (§3.1 step 3). On any error nothing is
 // written and the boundary stays put.
-func (p *Poller) scanReleases(ctx context.Context, r *config.Repo, page1 []entry) error {
+func (p *Poller) scanReleases(ctx context.Context, r *config.Repo, page1 []entry, start time.Time) error {
 	name := r.Name()
-	start := p.now()
 	rs, err := p.Store.RepoState(ctx, name)
 	if err != nil {
 		return storeErr(err)
@@ -431,6 +431,10 @@ func (p *Poller) scanReleases(ctx context.Context, r *config.Repo, page1 []entry
 			return err
 		}
 		seen := map[string]bool{}
+		stored, err := tx.RepoTags(ctx, name)
+		if err != nil {
+			return err
+		}
 		backfilled := 0
 		var newRows []*store.Release
 		for pi, pg := range pages {
@@ -439,6 +443,14 @@ func (p *Poller) scanReleases(ctx context.Context, r *config.Repo, page1 []entry
 					continue
 				}
 				seen[e.Tag] = true
+				if stored[e.Tag] {
+					// Already recorded (say, as a tag before the switch to releases):
+					// refresh pending notes, but don't spend the backfill quota on it.
+					if err := p.refreshNotes(ctx, tx, name, e); err != nil {
+						return err
+					}
+					continue
+				}
 				row := p.newRow(r, e, start)
 				filtered := p.filtered(r, row)
 				switch {
@@ -628,22 +640,43 @@ func (p *Poller) filtered(r *config.Repo, row *store.Release) bool {
 	return false
 }
 
-// insert stores a new row with its notes. For a row already stored and not
-// yet visible, it refreshes the notes from an edited release body.
-func (p *Poller) insert(ctx context.Context, tx *store.Tx, row *store.Release, e entry) (bool, error) {
-	body := strings.TrimSpace(e.Body)
-	if body != "" {
-		h, err := tx.PutNotes(ctx, body)
-		if err != nil {
-			return false, err
-		}
-		row.NotesSource, row.NotesHash = "release_body", h
+// bodyNotes stores a release body as notes, returning the source and hash;
+// an empty body is no notes.
+func bodyNotes(ctx context.Context, tx *store.Tx, body string) (string, string, error) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "", "", nil
 	}
+	h, err := tx.PutNotes(ctx, body)
+	return "release_body", h, err
+}
+
+// insert stores a new row with its notes. For a row already stored, it
+// refreshes the notes of a release that isn't visible yet.
+func (p *Poller) insert(ctx context.Context, tx *store.Tx, row *store.Release, e entry) (bool, error) {
+	src, h, err := bodyNotes(ctx, tx, e.Body)
+	if err != nil {
+		return false, err
+	}
+	row.NotesSource, row.NotesHash = src, h
 	ok, err := tx.InsertRelease(ctx, row)
-	if err != nil || ok || body == "" {
+	if err != nil || ok {
 		return ok, err
 	}
-	return false, tx.SetPendingNotes(ctx, row.Repo, row.Tag, row.NotesSource, row.NotesHash)
+	return false, p.refreshNotes(ctx, tx, row.Repo, e)
+}
+
+// refreshNotes applies an edited release body, including one edited to
+// empty, to a stored release that isn't visible yet.
+func (p *Poller) refreshNotes(ctx context.Context, tx *store.Tx, repo string, e entry) error {
+	if e.Kind != "release" {
+		return nil
+	}
+	src, h, err := bodyNotes(ctx, tx, e.Body)
+	if err != nil {
+		return err
+	}
+	return tx.SetPendingNotes(ctx, repo, e.Tag, src, h)
 }
 
 // setPredecessors records prev_tag for newly inserted, non-skipped rows from

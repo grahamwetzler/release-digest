@@ -261,3 +261,28 @@ func TestTagRefsAndDates(t *testing.T) {
 		t.Errorf("missing repo: %v, %v", refs, err)
 	}
 }
+
+func TestSecondaryRateLimitsWithoutHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		code    int
+		body    string
+		limited bool
+	}{
+		{"429", http.StatusTooManyRequests, `{"message":"slow down"}`, true},
+		{"403 secondary", http.StatusForbidden, `{"message":"You have exceeded a secondary rate limit."}`, true},
+		{"403 forbidden", http.StatusForbidden, `{"message":"Resource not accessible"}`, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.code)
+			w.Write([]byte(tc.body))
+		}))
+		c, _ := newClient(t, srv.URL, "")
+		c.Sleep = func(context.Context, time.Duration) bool { return true }
+		_, err := c.Releases(context.Background(), "o/r", 1)
+		if IsRateLimit(err) != tc.limited {
+			t.Errorf("%s: err = %v, rate limit = %v", tc.name, err, tc.limited)
+		}
+		srv.Close()
+	}
+}

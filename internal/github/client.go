@@ -234,8 +234,11 @@ func (c *Client) noteLimit(resp *rawResponse) (time.Duration, bool) {
 	if s, err := strconv.Atoi(resp.header.Get("Retry-After")); err == nil && s >= 0 {
 		retryAfter = time.Duration(s) * time.Second
 	}
-	limited := (resp.code == http.StatusForbidden || resp.code == http.StatusTooManyRequests) &&
-		(remaining == "0" || retryAfter >= 0)
+	// A 429 is always a rate limit. A 403 is one when the headers say so or,
+	// for a secondary limit sent without them, when its message does.
+	limited := resp.code == http.StatusTooManyRequests ||
+		(resp.code == http.StatusForbidden && (remaining == "0" || retryAfter >= 0 ||
+			strings.Contains(strings.ToLower(errorMessage(resp.body)), "rate limit")))
 	until := time.Time{}
 	switch {
 	case retryAfter >= 0 && limited:

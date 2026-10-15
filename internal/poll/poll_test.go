@@ -756,3 +756,58 @@ func TestRotate(t *testing.T) {
 		}
 	}
 }
+
+func TestReleasePublishedDuringTheFirstScanIsLive(t *testing.T) {
+	h := newHarness(t, "defaults: {backfill: 0}\nrepos: [{repo: o/r}]")
+	repo := h.gh.Repo("o/r")
+	repo.Releases = releases(0, 2, t0.Add(-time.Hour))
+	h.gh.Before = func(r *http.Request) {
+		if r.URL.Path == "/repos/o/r/releases" && h.now.Equal(t0) {
+			// Published while page 1 is being served, after the scan started.
+			repo.Releases = append([]githubtest.Release{{Tag: "v2.0.0", Published: t0.Add(30 * time.Second)}}, repo.Releases...)
+			h.now = t0.Add(time.Minute)
+		}
+	}
+	h.tick()
+	if r := h.row("o/r", "v2.0.0"); r == nil || r.Origin != store.OriginLive || r.State != store.StatePending {
+		t.Errorf("release published mid-scan = %+v, want live and pending", r)
+	}
+	if r := h.row("o/r", "v1.0.1"); r.State != store.StateSkipped {
+		t.Errorf("older release = %s, want skipped (backfill 0)", r.State)
+	}
+}
+
+func TestSwitchToReleasesDoesNotSpendBackfillOnStoredTags(t *testing.T) {
+	h := newHarness(t, "defaults: {backfill: 1}\nrepos: [{repo: o/r}]")
+	repo := h.gh.Repo("o/r")
+	repo.Tags = []githubtest.Tag{{Name: "v1.2.0", SHA: "b"}, {Name: "v1.1.0", SHA: "a"}}
+	h.tick()
+	// The repo publishes releases for its stored tags plus one older version never tagged before.
+	repo.Releases = []githubtest.Release{
+		{Tag: "v1.2.0", Published: t0.Add(-time.Hour)},
+		{Tag: "v1.1.0", Published: t0.Add(-2 * time.Hour)},
+		{Tag: "v1.0.0", Published: t0.Add(-3 * time.Hour)},
+	}
+	h.now = t0.Add(time.Hour)
+	h.tick()
+	if r := h.row("o/r", "v1.0.0"); r == nil || r.State != store.StatePending || r.Origin != store.OriginBackfill {
+		t.Errorf("unseen release = %+v, want it to take the backfill quota", r)
+	}
+}
+
+func TestPendingNotesFollowBodyEdits(t *testing.T) {
+	h := newHarness(t, "repos: [{repo: o/r}]")
+	repo := h.gh.Repo("o/r")
+	repo.Releases = []githubtest.Release{{Tag: "v1.0.0", Body: "Original notes", Published: t0.Add(-time.Hour)}}
+	h.tick()
+	for _, body := range []string{"Edited notes", "  "} {
+		repo.Releases[0].Body = body
+		h.now = h.now.Add(time.Hour)
+		h.tick()
+		r := h.row("o/r", "v1.0.0")
+		text, _ := h.st.Notes(h.ctx, r.NotesHash)
+		if want := strings.TrimSpace(body); text != want || (want == "") != (r.NotesSource == "") {
+			t.Errorf("after editing the body to %q: notes %q, source %q", body, text, r.NotesSource)
+		}
+	}
+}

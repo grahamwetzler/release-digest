@@ -68,7 +68,7 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 - **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback` (§3.3), so fallback publication never waits on the LLM. It does wait for a fresh public confirmation of the repo (§3.1, processing gate).
 - Render also runs after every 5 completed summaries, so a long summarize pass publishes as it goes.
 
-**Visibility first.** Every tick begins with a **visibility sweep** that checks *all* repos (§3.1 step 0) before any other work. Unchanged repos return 304s, which cost no rate limit. The sweep runs 8 at a time, with a 10s timeout per request and its own **`schedule.sweep_budget`** (default 2m). Any repo not confirmed when the budget runs out is **unverified** for this tick: the gate treats it like a failed check, and it's simply retried next tick. A few slow repos therefore delay only themselves, never the feed. The result is recorded as `visibility_confirmed_tick`.
+**Visibility first.** Every tick begins with a **visibility sweep** that checks *all* repos (§3.1 step 0) before any other work. Unchanged repos return 304s, which cost no rate limit. The sweep runs 8 at a time, with a 10s timeout per request and its own **`schedule.sweep_budget`** (default 2m). Any repo not confirmed when the budget runs out is **unverified** for this tick: the gate treats it like a failed check, and it's simply retried next tick. A few slow repos therefore delay only themselves, never the feed. The sweep starts from a persisted **sweep cursor**, the repo after the last one it *attempted*, whatever the outcome. So repos that time out rotate to the back, and every repo is reached within ⌈repos ÷ repos-per-sweep⌉ ticks even if some always time out. The result is recorded as `visibility_confirmed_tick`.
 
 **Fairness:** after the sweep, repos' content is polled round-robin from a persisted cursor, so a pass cut short by the budget or a rate limit picks up where it stopped. Summaries are taken oldest `first_seen_at` first, at most `llm.max_per_pass` (default 20) per pass.
 
@@ -80,7 +80,7 @@ For each repo:
    - On `private: true` **or a 404** (a repo that's gone private looks like a 404 to a token without access), the repo is marked **held** in `repo_state` and an error is logged. `config lint` fails on it. Holding is **not terminal**: rows keep their state, and nothing is moved to `skipped` or cancelled.
    - **Processing gate (strict).** Any action that would newly expose a repo's content has to pass two checks:
 
-1. **Tick confirmation.** `visibility_confirmed_tick` equals the running tick's ID, so the repo passed this tick's sweep. A confirmation from an earlier tick never counts.
+1. **Tick confirmation** (scheduler stages only). `visibility_confirmed_tick` equals the running tick's ID, so the repo passed this tick's sweep. A confirmation from an earlier tick never counts. The **outbox worker is exempt** from this rule, because it runs between ticks. Its own rule is the just-in-time check below, which by itself is stricter, since it's taken seconds before the send.
 2. **Just-in-time check.** Immediately before each exposing action, a conditional `GET /repos/{o}/{r}` must return `private: false`. That means before each **LLM call**, before each render's **first publication** (one check per repo per render pass, covering the promotions made in that pass), and before each **ntfy send**.
    - Unchanged repos return 304s, so this costs no rate limit.
    - A just-in-time check that fails, returns 404 or says private **invalidates** the tick confirmation at once (`visibility_confirmed_tick = NULL`). If it says private or 404, it also holds the repo. Nothing else for that repo runs this tick.
@@ -106,7 +106,8 @@ So the exposure window is the few seconds between a just-in-time check and the r
 
    **Daily reconciliation.** Once per day per repo, staggered by the round-robin cursor, a scan reads `reconcile_pages` pages (default `max_pages + 5` = 10, i.e. 300 entries) regardless of the boundary. This catches anything missed for any reason: shifts during a scan, bugs, or a repo that was misconfigured for a while. It's ordinary list traffic, mostly 304s. Reconciliation is **not atomic**: it only inserts missing rows, idempotently, and never moves the boundary. So it checks the poll budget **between pages**, persists `reconcile_next_page`, and resumes there next tick. Its contribution to the overrun bound is one page request.
 
-- **Classifying what it finds.** Any version it finds that isn't stored is inserted with `origin = reconcile`. It's `pending` only if **both** of these hold: it was published within `publish_window` (default 7d), and it was published **after the repo's `initialized_at`**. Otherwise it's `skipped`. Releases that predate tracking never become pending through reconciliation, however many there were, so the first-sight `backfill` limit holds.
+- **`publish_window` follows the alert window.** It defaults to `max(7d, notify.max_age)`, and `config lint` rejects an explicit `publish_window` shorter than `notify.max_age`. A release that's still alert-eligible can never be reconciled as `skipped`.
+- **Classifying what it finds.** Any version it finds that isn't stored is inserted with `origin = reconcile`. It's `pending` only if **both** of these hold: it was published within `publish_window`, and it was published **after the repo's `initialized_at`**. Otherwise it's `skipped`. Releases that predate tracking never become pending through reconciliation, however many there were, so the first-sight `backfill` limit holds.
 - **Coverage bound (accepted).** The extra 5 pages give a missed entry headroom. It's lost only if a deletion displaced it during a scan, **and** more than 150 newer releases landed before the next reconciliation (within a day). No realistic repo publishes 150 releases a day, and `exclude_pattern` handles nightly-tag firehoses. This bound is documented rather than engineered away: GitHub's list API has no cursor or snapshot, so no client-side scheme can fully close it.
 4. Classify each version (§3.1.1). Then filter by `include_prereleases`, by drafts (always excluded) and by the optional `tag_pattern` / `exclude_pattern` regexes, such as skipping `nightly-*`. Filtered versions are recorded as `skipped`, which keeps them available for predecessor selection (§3.2.1).
 5. Insert each unseen, unfiltered version as a `release` row in state `pending`. Every row records its **`origin`** in the same transaction: `live` (normal page-1 discovery), `backfill` (first sight), `catchup` or `reconcile`. Alerting (§3.4) relies on it. `origin` is part of milestone 2's schema, so rows predating alerting are already classified.
@@ -212,7 +213,7 @@ The resolved text, its source (`release_body` / `changelog` / `compare`) and its
 | State | In feed? | Summarize-eligible? | Transitions |
 |---|---|---|---|
 | `skipped` | no | no | terminal: backfill, filter or catch-up overflow |
-| `pending` | no | yes, when `next_attempt_at ≤ now` | → `summarized` on success; → `fallback` at render time once `now − first_seen_at ≥ llm.publish_after` (default 6h); → `no_notes` when notes resolve to none |
+| `pending` | no | yes, when `next_attempt_at ≤ now`. Rows are inserted with `next_attempt_at = first_seen_at`, and the column is `NOT NULL`, so a new release is eligible immediately | → `summarized` on success; → `fallback` at render time once `now − first_seen_at ≥ llm.publish_after` (default 6h); → `no_notes` when notes resolve to none |
 | `fallback` | yes, excerpt | yes, when `next_attempt_at ≤ now` (no age cutoff) | → `summarized` on success; content updates, identity doesn't. → `no_notes` when resolution (§3.2) completes and finds no usable notes. This happens when render promoted the item before resolution had finished. A *transient* resolution failure (an error, a rate limit) is not "no notes": the item stays `fallback` and retries |
 | `summarized` | yes | no | → re-summarized only by `resummarize` |
 | `no_notes` | yes, deterministic | no | → `fallback` when a later poll finds notes (the release body was edited or a changelog section appeared). It stays in the feed and becomes eligible immediately |
@@ -230,6 +231,14 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 
 **Detection.** A release is **urgent** when either signal fires. The deterministic signal can fire without the LLM, so `fallback` items are covered too.
 
+**This release must fix the advisory.** Mentioning an advisory isn't enough, since notes also cite unfixed or upstream CVEs. A matched advisory counts toward *this* release only on positive evidence that the release fixes it:
+
+1. **Version evidence (preferred).** For the matched package, the advisory's `vulnerabilities[]` entry has a `first_patched_version`. Parsed with the release's version scheme (§3.1.1), the release must be **≥ `first_patched_version`**, and its predecessor (`prev_tag`), when known, must fall inside `vulnerable_version_range`. In other words, this is the release that crossed from vulnerable to patched.
+2. **Text evidence (fallback when there's no version data).** The advisory ID appears in the same bullet or line as a fix verb (`fix`, `patch`, `resolve`, `address`, `mitigate`), and not in the same line as a negation (`not yet`, `unfixed`, `still affected`, `known issue`).
+3. **Neither.** The link is stored with `fixes = 0`. The advisory doesn't fire the signal and is logged.
+
+`fixes` is stored on the link and re-evaluated with `matched` on every recompute.
+
 1. **Advisory signal (deterministic, preferred).** GHSA IDs (`GHSA-xxxx-xxxx-xxxx`) and CVE IDs in the resolved notes are looked up through GitHub's global advisory API: `GET /advisories/{ghsa_id}`, or `GET /advisories?cve_id=…`. The release is urgent if any advisory meets three conditions: its severity is ≥ `notify.min_severity` (default `high`), it isn't withdrawn, and it **matches this repo**. An LLM can't talk this signal down.
 
    - **Matching a repo to an advisory:**
@@ -246,9 +255,15 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 
    To limit false positives, `urgent` only counts if the item's `security` list is non-empty **and** the resolved notes contain a security keyword (`security`, `vulnerab`, `CVE-`, `GHSA-`, `exploit`). Otherwise it's downgraded to `advisory` and logged.
 
-**Urgency on the item.** `releases.urgency` (`none` / `advisory` / `urgent`) and `urgency_source` are stored separately from the summary state. The rendered marking (`🚨` title prefix, `security-urgent` category) follows `urgency`. Any change to it is a permitted content change (§1) and advances `content_updated_at`. Urgency is **recomputed** whenever an input changes: an advisory refresh, a new or updated LLM summary, or a `min_severity` config change. The result is the maximum of the two signals:
+**Urgency on the item.** `releases.urgency` (`none` / `advisory` / `urgent`) and `urgency_source` are stored separately from the summary state. The rendered marking (`🚨` title prefix, `security-urgent` category) follows `urgency`. Any change to it is a permitted content change (§1) and advances `content_updated_at`. Urgency is **recomputed** whenever an input changes:
 
-- **Advisory signal:** fires if any linked advisory meets three conditions: it isn't withdrawn, it meets `min_severity`, and its link is currently **matched** to this repo. The match uses the same rules as detection (`source_code_location` or configured `packages`). It's re-evaluated and stored on the link (`release_advisories.matched`) on every recomputation, because both the advisory and the config can change. An advisory mentioned in the notes that belongs to an unrelated dependency never counts.
+- an advisory refresh
+- a new or updated LLM summary
+- a config change that affects matching or thresholds: `min_severity`, or a repo's `packages`
+
+Config inputs are fingerprinted, and the fingerprint is stored in `scheduler_state`. At startup and on SIGHUP, a changed fingerprint triggers a recompute of every alert-eligible or currently marked release of the affected repos. This finishes **before the outbox worker starts**, so a queued alert that a config change made stale is cancelled before it can be sent. The result is the maximum of the two signals:
+
+- **Advisory signal:** fires if any linked advisory meets three conditions: it isn't withdrawn, it meets `min_severity`, and its link is currently **matched** to this repo, and the link has **`fixes = 1`** (this release fixes it). The match uses the same rules as detection (`source_code_location` or configured `packages`). It's re-evaluated and stored on the link (`release_advisories.matched`) on every recomputation, because both the advisory and the config can change. An advisory mentioned in the notes that belongs to an unrelated dependency never counts.
 - **LLM signal:** the validated LLM urgency.
 
 So urgency can go **down** as well as up, for example when the only qualifying advisory is downgraded from high to medium or withdrawn and no LLM `urgent` remains. The marking follows, and the change advances `content_updated_at`. A sent alert is never retracted, and an alert can't be re-sent by the same release escalating again (it's enqueued once, keyed by GUID).
@@ -278,11 +293,21 @@ Truncation happens at a rune boundary with `…`. The links are in headers (`Cli
 
 - **Timing:** it wakes every 30s, or immediately when a row is enqueued, and sends at most 10 per wake, each with a 10s request timeout. Dispatch latency after a decision is normally a few seconds.
 - **Enqueued once per release.** Rows are keyed by GUID, so `resummarize`, restarts and state transitions never enqueue twice.
-- **Claiming.** The worker **claims** a row by atomically moving it from `queued` to `sending` in its own transaction. Only then does it run the just-in-time visibility check. In a **second transaction** immediately before the POST, it re-reads the row and proceeds only if it's still `sending` and `cancel_requested = 0`.
+- **Claiming.** The worker **claims** a row by atomically moving it from `queued` to `sending` in its own transaction. Only then does it run the just-in-time visibility check. In a **second transaction** immediately before the POST, it re-reads the row and proceeds only if it's still `sending` and `cancel_requested = 0`. It then sends the stored `payload` exactly as it is.
+- **Every claimed row ends in exactly one state**, decided in one transaction after the attempt:
+
+  | Outcome | `cancel_requested = 0` | `cancel_requested = 1` |
+  |---|---|---|
+  | Visibility check fails, times out or is private | → `queued`, `next_attempt_at` per backoff (private/404 also holds the repo, §3.1) | → `cancelled` |
+  | Pre-POST re-read finds it cancelled | — | → `cancelled`, no send |
+  | POST returns 2xx | → `sent` | → `sent`. The race was lost and it's logged |
+  | POST fails or is ambiguous | → `queued`, `next_attempt_at` per backoff | → `cancelled`, no retry. An ambiguous POST may have been delivered, and that's logged |
+
+  A row is marked `sent` **only** on a 2xx.
 - **De-escalation cancels unsent alerts.** When recomputed urgency drops below `urgent`, the outcome depends on the row's state at that moment. It all happens in one transaction:
   - A `queued` row becomes `cancelled`.
-  - A `sending` row gets `cancel_requested = 1`. If the worker hasn't passed its pre-POST re-read, it moves the row to `cancelled` and doesn't send. If the POST has already started, the alert goes out and the row ends `sent`. That's an accepted race with a window of one HTTP request, and it's logged.
-  - If the release escalates again within `max_age`, a `cancelled` row returns to `queued` and `cancel_requested` is cleared.
+  - A `sending` row gets `cancel_requested = 1`, and the claim table above decides its final state.
+  - If the release escalates again within `max_age`, a `cancelled` row returns to `queued` with `cancel_requested` cleared. Its `reason`, `payload` and priority are **rebuilt from the current deciding signals** in the same transaction, so a re-queued alert never describes a withdrawn advisory.
   - A `sent` row is never touched: no retraction, and no second send.
 - **Crash safety.** A row left in `sending` after a crash or restart goes back to `queued` at startup, which is consistent with at-least-once.
 - **Delivery is at-least-once.** A row is marked `sent` only after a 2xx. If ntfy accepted the POST but the response was lost (timeout, connection reset, crash before the commit), the retry can deliver a **duplicate**. That's deliberate: for an urgent security alert, a rare duplicate beats a lost alert. The README documents it.
@@ -571,7 +596,7 @@ CREATE TABLE releases (
   notes_hash     TEXT NOT NULL DEFAULT '',
   summary_key    TEXT,                     -- → summaries.key
   attempts       INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at INTEGER,
+  next_attempt_at INTEGER NOT NULL,        -- = first_seen_at on insert (§3.3)
   last_error     TEXT NOT NULL DEFAULT '',
   origin         TEXT NOT NULL,            -- live | backfill | catchup | reconcile (§3.1)
   urgency        TEXT NOT NULL DEFAULT 'none',  -- none | advisory | urgent (§3.4)
@@ -603,13 +628,14 @@ CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_suc
                          scan_boundary TEXT,          -- newest tag of last completed scan (§3.1)
                          reconcile_next_page INTEGER, last_reconciled_at INTEGER,
                          last_error TEXT DEFAULT '');
-CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- e.g. poll round-robin cursor
+CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- poll and sweep round-robin cursors
 CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at INTEGER);
 
 CREATE TABLE advisories (id TEXT PRIMARY KEY, found INTEGER NOT NULL, severity TEXT, withdrawn_at INTEGER,
                          json TEXT, fetched_at INTEGER NOT NULL, next_fetch_at INTEGER NOT NULL);
 CREATE TABLE release_advisories (repo TEXT, tag TEXT, advisory_id TEXT,
                                  matched INTEGER NOT NULL DEFAULT 0,  -- re-evaluated on each recompute (§3.4)
+                                 fixes   INTEGER NOT NULL DEFAULT 0,  -- this release fixes it (§3.4)
                                  PRIMARY KEY (repo, tag, advisory_id));
 CREATE TABLE notifications (               -- outbox (§3.4); one row per release ever alerted
   guid        TEXT PRIMARY KEY,            -- releases.guid: at-most-once
@@ -665,7 +691,20 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - A repo that turns private between ticks: the next tick's sweep holds it before any summarize or promotion, and the outbox's just-in-time check stops a queued alert mid-tick.
   - A repo that turns private *after* the sweep: the just-in-time check before its LLM call fails, invalidates the tick confirmation, and nothing more is sent or promoted for it this tick.
   - A sweep where 50 repos time out ends at `sweep_budget`. Those repos are unverified, and the feed still renders on time.
-  - Cancellation races: cancel while `queued` → no send; cancel after claim but before the pre-POST re-read → no send; cancel during the POST → sent once, logged. A row stuck in `sending` after a crash is re-queued at startup.
+  - Cancellation races, one per cell of the claim table:
+    - cancel while `queued` → no send
+    - cancel after the claim but before the pre-POST re-read → no send
+    - cancel during a POST that succeeds → `sent` once, logged
+    - cancel during a POST that fails → `cancelled`, no retry
+    - a visibility timeout after the claim → re-queued with backoff, not stuck
+    - a row stuck in `sending` after a crash → re-queued at startup
+  - Re-escalation by a different advisory rebuilds the payload.
+  - The outbox delivers and retries between ticks using only its just-in-time check, including the final pre-expiry attempt.
+  - Sweep rotation: 3 always-timing-out repos at the head of the list don't stop the others being confirmed within the stated number of ticks.
+  - Editing a repo's `packages`, then SIGHUP, re-matches advisories and cancels a now-stale queued alert before the worker runs.
+  - Advisory fix evidence: a release past `first_patched_version` whose predecessor is vulnerable fires the signal. Notes that say "CVE-… is not yet fixed", or that cite an upstream advisory, don't.
+  - A newly inserted `pending` row is summarize-eligible immediately (`next_attempt_at = first_seen_at`).
+  - With `notify.max_age: 14d`, a post-initialization release recovered by reconciliation on day 10 is `pending` and alert-eligible.
   - An advisory for an unrelated dependency, mentioned in the notes and raised to `critical`, never marks the release.
   - A withdrawal during an ntfy outage cancels the queued alert, and re-escalation re-queues it once.
   - A post-initialization release recovered by reconciliation alerts. A pre-initialization one doesn't.

@@ -68,7 +68,9 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 - **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback` (§3.3), so fallback publication never waits on the LLM. It does wait for a fresh public confirmation of the repo (§3.1, processing gate).
 - Render also runs after every 5 completed summaries, so a long summarize pass publishes as it goes.
 
-**Fairness:** repos are polled round-robin from a persisted cursor, so a pass cut short by the budget or a rate limit picks up where it stopped. Summaries are taken oldest `first_seen_at` first, at most `llm.max_per_pass` (default 20) per pass.
+**Visibility first.** Every tick begins with a **visibility sweep** that checks *all* repos (§3.1 step 0) before any other work. Unchanged repos return 304s, which cost no rate limit, and the sweep runs 4 at a time. It isn't subject to the round-robin or the poll budget, so no repo goes unchecked in a tick. Its result is recorded as `visibility_confirmed_tick`.
+
+**Fairness:** after the sweep, repos' content is polled round-robin from a persisted cursor, so a pass cut short by the budget or a rate limit picks up where it stopped. Summaries are taken oldest `first_seen_at` first, at most `llm.max_per_pass` (default 20) per pass.
 
 ### 3.1 Poll (GitHub)
 
@@ -76,7 +78,7 @@ For each repo:
 
 0. **Public check, every poll, fail-closed.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` **before every poll** of that repo. When authenticated, an unchanged repo is a 304 and costs no rate limit. The repo is fetched only if this tick's response (or its validated 304) says `private: false`. If the response says `private: true`, or the check fails for any reason (error, timeout, rate limit), nothing else is fetched for that repo this tick.
    - On `private: true` **or a 404** (a repo that's gone private looks like a 404 to a token without access), the repo is marked **held** in `repo_state` and an error is logged. `config lint` fails on it. Holding is **not terminal**: rows keep their state, and nothing is moved to `skipped` or cancelled.
-   - **Processing gate (strict).** Any action that would newly expose a repo's content requires a **fresh public confirmation**: the repo's most recent visibility check succeeded with `private: false`, and it's no older than `schedule.interval + jitter` (in other words, from the latest tick). That covers:
+   - **Processing gate (strict).** Any action that would newly expose a repo's content requires a **public confirmation from the current tick**: `visibility_confirmed_tick` equals the running tick's ID, so the repo passed this tick's visibility sweep. A confirmation from an earlier tick never counts. The outbox worker, which runs between ticks, goes further and does a **just-in-time check**: a conditional `GET /repos/{o}/{r}` immediately before each send, which must return `private: false`, or the alert waits. The gate covers:
      - GitHub content fetches, notes resolution, LLM calls, advisory lookups, metadata and existence checks
      - new alert decisions
      - render-time `pending` → `fallback` **promotion** (first publication)
@@ -239,7 +241,7 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 
 **Urgency on the item.** `releases.urgency` (`none` / `advisory` / `urgent`) and `urgency_source` are stored separately from the summary state. The rendered marking (`🚨` title prefix, `security-urgent` category) follows `urgency`. Any change to it is a permitted content change (§1) and advances `content_updated_at`. Urgency is **recomputed** whenever an input changes: an advisory refresh, a new or updated LLM summary, or a `min_severity` config change. The result is the maximum of the two signals:
 
-- **Advisory signal:** fires if any linked advisory that isn't withdrawn meets `min_severity`.
+- **Advisory signal:** fires if any linked advisory meets three conditions: it isn't withdrawn, it meets `min_severity`, and its link is currently **matched** to this repo. The match uses the same rules as detection (`source_code_location` or configured `packages`). It's re-evaluated and stored on the link (`release_advisories.matched`) on every recomputation, because both the advisory and the config can change. An advisory mentioned in the notes that belongs to an unrelated dependency never counts.
 - **LLM signal:** the validated LLM urgency.
 
 So urgency can go **down** as well as up, for example when the only qualifying advisory is downgraded from high to medium or withdrawn and no LLM `urgent` remains. The marking follows, and the change advances `content_updated_at`. A sent alert is never retracted, and an alert can't be re-sent by the same release escalating again (it's enqueued once, keyed by GUID).
@@ -269,10 +271,16 @@ Truncation happens at a rune boundary with `…`. The links are in headers (`Cli
 
 - **Timing:** it wakes every 30s, or immediately when a row is enqueued, and sends at most 10 per wake, each with a 10s request timeout. Dispatch latency after a decision is normally a few seconds.
 - **Enqueued once per release.** Rows are keyed by GUID, so `resummarize`, restarts and state transitions never enqueue twice.
+- **De-escalation cancels unsent alerts.** When recomputed urgency drops below `urgent`, a `queued` row for that release becomes `cancelled` in the same transaction. If the release escalates again while still within `max_age`, that row returns to `queued`. A `sent` row is never touched: no retraction, and no second send.
 - **Delivery is at-least-once.** A row is marked `sent` only after a 2xx. If ntfy accepted the POST but the response was lost (timeout, connection reset, crash before the commit), the retry can deliver a **duplicate**. That's deliberate: for an urgent security alert, a rare duplicate beats a lost alert. The README documents it.
 - **Retries:** a failed or ambiguous delivery retries with backoff (1m → 1h cap) **until it succeeds or the release passes `notify.max_age`**. The next attempt is scheduled at `min(now + backoff, expiry − 2m)`, so a backoff step can never jump past the window: there's always a final attempt just before expiry. Then it's marked `expired`, logged at error level, and reported on `/healthz` as degraded until it's acknowledged with `release-digest notify ack`.
 - **Exact guarantee:** the alert is delivered, possibly more than once, **if any attempt inside the alert window succeeds** (`max_age`, default 7d, from the release's pubDate). Attempts run at least hourly throughout the window, plus one just before expiry, and they're also held while the repo lacks fresh public confirmation (§3.1). An ntfy outage that covers every attempt drops the alert, but never silently. A week-late "urgent" ping has little value, and the release is still marked in the feed.
-- **Not on backfill.** Only releases with `origin = live` alert by default. `backfill`, `catchup` and `reconcile` rows don't, unless `notify.include_backfill: true`. `origin` is persisted at insert (§3.1), so this holds across restarts and delayed summaries. Neither do releases older than `notify.max_age` (default 7d) by pubDate. Adding a repo or restarting after downtime doesn't produce an alert storm.
+- **Not on backfill.** Alert eligibility depends on **publication time**, not discovery path:
+  - A release alerts only if `published_at > repo_state.initialized_at` (it shipped after tracking began) and it's within `notify.max_age` (default 7d) by pubDate.
+  - That holds however it was found: a live poll, a catch-up after downtime, or reconciliation. A release recovered by reconciliation that shipped after the first scan began is alert-eligible.
+  - Releases that predate tracking never alert unless `notify.include_backfill: true`.
+  - `origin` is still stored for diagnostics and the `backfill` quota, but it doesn't gate alerts.
+  - Adding a repo never produces an alert storm. After downtime, only urgent releases from the last `max_age` alert, which is the point.
 - **Pre-releases** alert only if `notify.include_prereleases: true`.
 - **Late detection still counts.** An item already published as `fallback` can turn urgent later when its LLM summary lands. It still alerts once, if it's within `max_age`.
 - **Feed marking.** Urgent items also get a `🚨` title prefix and a `security-urgent` category in the feed, whether or not ntfy is configured.
@@ -576,7 +584,8 @@ CREATE TABLE summaries (
 
 CREATE TABLE http_cache (url TEXT PRIMARY KEY, etag TEXT, body BLOB, fetched_at INTEGER);
 CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_success_at INTEGER,
-                         held INTEGER NOT NULL DEFAULT 0, visibility_confirmed_at INTEGER,  -- last successful public check (§3.1)
+                         held INTEGER NOT NULL DEFAULT 0, visibility_confirmed_at INTEGER,
+                         visibility_confirmed_tick INTEGER,     -- tick ID of last successful public check (§3)
                          scan_boundary TEXT,          -- newest tag of last completed scan (§3.1)
                          reconcile_next_page INTEGER, last_reconciled_at INTEGER,
                          last_error TEXT DEFAULT '');
@@ -585,13 +594,15 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
 
 CREATE TABLE advisories (id TEXT PRIMARY KEY, found INTEGER NOT NULL, severity TEXT, withdrawn_at INTEGER,
                          json TEXT, fetched_at INTEGER NOT NULL, next_fetch_at INTEGER NOT NULL);
-CREATE TABLE release_advisories (repo TEXT, tag TEXT, advisory_id TEXT, PRIMARY KEY (repo, tag, advisory_id));
+CREATE TABLE release_advisories (repo TEXT, tag TEXT, advisory_id TEXT,
+                                 matched INTEGER NOT NULL DEFAULT 0,  -- re-evaluated on each recompute (§3.4)
+                                 PRIMARY KEY (repo, tag, advisory_id));
 CREATE TABLE notifications (               -- outbox (§3.4); one row per release ever alerted
   guid        TEXT PRIMARY KEY,            -- releases.guid: at-most-once
   channel     TEXT NOT NULL,               -- ntfy
   reason      TEXT NOT NULL,               -- advisory:GHSA-… | llm
   payload     TEXT NOT NULL,
-  state       TEXT NOT NULL,               -- queued | sent | expired
+  state       TEXT NOT NULL,               -- queued | sent | expired | cancelled
   attempts    INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER,
   created_at  INTEGER NOT NULL,
@@ -636,6 +647,10 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - An advisory withdrawn 30 days after release still clears the marking via the weekly refresh. An advisory first seen as `medium` and raised to `critical` 10 days later marks the still-visible release urgent but sends no alert, because it's past `max_age`.
   - A release published while a repo's first scan is in flight is `origin = live` and alert-eligible, whether it's found by that scan or later by reconciliation.
   - Urgency is downgraded when the only `high` advisory becomes `medium` and the marking is removed. A later re-escalation doesn't re-send the alert.
+  - A repo that turns private between ticks: the next tick's sweep holds it before any summarize or promotion, and the outbox's just-in-time check stops a queued alert mid-tick.
+  - An advisory for an unrelated dependency, mentioned in the notes and raised to `critical`, never marks the release.
+  - A withdrawal during an ntfy outage cancels the queued alert, and re-escalation re-queues it once.
+  - A post-initialization release recovered by reconciliation alerts. A pre-initialization one doesn't.
   - An ntfy outage that ends 30m before expiry, while the backoff is at 1h, still delivers via the final pre-expiry attempt.
   - A reconciliation interrupted by the budget resumes at `reconcile_next_page`.
 - **identity:** a `fallback` → `summarized` upgrade, a `fallback` → `no_notes` transition and a `no_notes` → `fallback` transition keep the GUID, the pubDate and feed membership, and advance Atom `<updated>`.

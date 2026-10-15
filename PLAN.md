@@ -11,13 +11,14 @@ A Go service that watches a configured list of GitHub repositories for new versi
 1. **One summarized item per release.** Each new version of a watched repo becomes one feed item. The item has a short LLM-written TL;DR and a link to the full notes.
 2. **Works on repos that don't do Releases well.** It uses GitHub Releases when a repo has them, falls back to tags when it doesn't, and pulls from `CHANGELOG.md` when the release body is empty or just says "see changelog".
 3. **Any OpenAI-compatible LLM.** It speaks one protocol, `POST /v1/chat/completions`, so Ollama, LM Studio, vLLM, OpenRouter, OpenAI and Anthropic's OpenAI-compatible endpoint all work through config alone.
-4. **Cheap and stable.** Each release is summarized **once** and cached by input hash. Re-running never re-bills the LLM or rewrites a published item. GitHub is polled with conditional requests.
+4. **Cheap and stable.** Each release is summarized **once** and cached by input hash, so re-running never re-bills the LLM. A published item's **identity** (GUID, link, pubDate) never changes. Its **content** changes in only two cases: a fallback item is upgraded to a real summary (§3.3), or the user runs `resummarize` explicitly. GitHub is polled with conditional requests.
 5. **Spec-compliant output.** RSS 2.0 passes the W3C validator, with stable GUIDs and timestamps. Atom 1.0 comes almost free by reusing feed-me's renderer.
 6. **Easy to run.** It ships as one static binary in a distroless image, keeps its SQLite store on a volume, and takes config from a YAML file plus env overrides.
 7. **Secrets stay out of env and config.** API keys can come from Docker secrets (files under `/run/secrets/`), so an OpenRouter key never appears in `docker inspect`, compose files, or the process environment (§4.3).
 
 ### Non-goals (for v1)
 
+- **Private repositories.** v1 is public-only (§3.1). Private release notes would otherwise be sent to a third-party LLM and published in an unauthenticated feed.
 - Per-repo or grouped feeds. There is one combined feed, though the store is keyed so that adding them later is trivial (§12).
 - Periodic rollup digests (daily or weekly). The item model doesn't preclude them.
 - GitHub Projects (v2) boards, GitLab, PyPI, npm and other non-GitHub sources.
@@ -53,20 +54,43 @@ The workaround of pointing RSSbrew at `github.com/<repo>/releases.atom` URLs mis
                      compare commits
 ```
 
-There is one long-lived process. The scheduler runs a **poll pass** over every repo, then a **summarize pass** over every pending release, then re-renders the feed if anything changed. The HTTP server only reads the rendered bytes. This matches feed-me: one writer, many readers.
+There is one long-lived process. Each scheduler tick runs three stages: a **poll pass**, then a **summarize pass**, then a **render**. The HTTP server only reads the rendered bytes. This matches feed-me: one writer, many readers.
+
+**Bounded passes:** no single slow repo or flaky upstream can stall the feed.
+
+- The whole tick has a deadline, `schedule.pass_budget` (default 15m). The poll and summarize stages each stop when it's reached, and their unfinished work stays queued in the store for the next tick.
+- **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback` (§3.3), so fallback publication never waits on GitHub or the LLM.
+- Render also runs after every 5 completed summaries, so a long summarize pass publishes as it goes.
+
+**Fairness:** repos are polled round-robin from a persisted cursor, so a pass cut short by the budget or a rate limit picks up where it stopped. Summaries are taken oldest `first_seen_at` first, at most `llm.max_per_pass` (default 20) per pass.
 
 ### 3.1 Poll (GitHub)
 
 For each repo:
 
-1. `GET /repos/{owner}/{repo}/releases?per_page=30` with `If-None-Match`. When authenticated, a 304 doesn't count against the rate limit.
+0. **Public check.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` at most once a day. If `private` is `true`, the repo is refused: it is logged as an error, recorded in `repo_state.last_error`, and never fetched or summarized. `config lint` fails on it. A repo that turns private later stops being polled. Its already-published items stay in the feed, since they were public when fetched.
+1. `GET /repos/{owner}/{repo}/releases?per_page=30` (page 1) with `If-None-Match`. When authenticated, a 304 doesn't count against the rate limit.
 2. If the repo has **no releases** (or `sources: [tags]` is set), call `GET /repos/{owner}/{repo}/tags?per_page=30` and resolve each new tag's commit date with `GET /repos/{owner}/{repo}/commits/{sha}`, whose result is cached forever.
-3. Filter by `include_prereleases`, `include_drafts` (always false), and the optional `tag_pattern` / `exclude_pattern` regexes, such as skipping `nightly-*`.
-4. Insert each unseen version as a `release` row in state `pending`.
+3. **Catch-up pagination.** If every entry on page 1 is unseen and the repo has already been initialized, after downtime or a burst of releases, fetch further pages until a known tag appears or `max_pages` (default 5) is reached. Unseen versions beyond the cap are recorded as `skipped` with a logged warning.
+4. Classify each version (§3.1.1). Then filter by `include_prereleases`, by drafts (always excluded) and by the optional `tag_pattern` / `exclude_pattern` regexes, such as skipping `nightly-*`. Filtered versions are recorded as `skipped`, which keeps them available for predecessor selection (§3.2.1).
+5. Insert each unseen, unfiltered version as a `release` row in state `pending`.
 
-**First sight of a repo:** only the newest `backfill` releases are queued (default 3). Older ones are recorded as `skipped` so they're never summarized. That keeps the LLM bill for adding a repo predictable.
+**First sight of a repo:** only page 1 is read, and only its newest `backfill` versions are queued (default 3). The rest of page 1 is recorded as `skipped` so they're never summarized but can serve as predecessors. That keeps the LLM bill for adding a repo predictable. `repo_state.initialized_at` is set only after this completes without error. An interrupted first poll is redone from scratch, not treated as initialized.
 
-**Rate limits:** `GITHUB_TOKEN` is optional but strongly recommended (60 vs 5,000 req/h). The client reads `X-RateLimit-Remaining` and `Retry-After` and pauses the pass instead of failing it. A classic token with no scopes, or a fine-grained token with public read access, is enough. Private repos need `contents:read`.
+**Deletion detection.** Disappearing from a list response is never enough to mark a release deleted: lists are paginated and windowed. A stored release is a deletion *candidate* only if it is newer than the oldest entry on page 1 yet absent from page 1, so it should have been there. Each candidate is confirmed with a direct check: `GET /repos/{o}/{r}/releases/tags/{tag}` or `GET /repos/{o}/{r}/git/ref/tags/{tag}` must return 404. Only then is `missing_since` set. Any other outcome leaves the record untouched: an error, a rate limit, a timeout, or a poll cut short by the budget. If a later poll sees the release again, `missing_since` is cleared.
+
+**Rate limits:** `GITHUB_TOKEN` is optional but strongly recommended (60 vs 5,000 req/h). The client reads `X-RateLimit-Remaining`, `X-RateLimit-Reset` and `Retry-After`. If the reset is under 2 minutes away, it waits. Otherwise it ends the poll stage early, and the round-robin cursor (§3) resumes there next tick. Recommended token: a fine-grained token with **"Public repositories (read-only)"** access and no other permissions. It can't read private repos even by mistake.
+
+#### 3.1.1 Version classification
+
+Each version gets one `Version` value, computed once and stored. Both filtering and rendering use it.
+
+- **Stream prefix + version:** the tag is split into an optional stream prefix and a version. The prefix is anything before the version, for example `service/api/` in `service/api/v1.4.0`, or `go` in `go1.28.1`. The version is parsed leniently as SemVer: an optional `v`, then 1–4 numeric components, then an optional pre-release suffix and build metadata.
+- **Pre-release:**
+  - For GitHub Releases, the `prerelease` flag **or** a parsed pre-release suffix marks it, since some projects forget the flag.
+  - For tags, a SemVer pre-release segment (`-rc.1`) marks it, or a match of `prerelease_pattern` against the part after the numeric components. The default pattern is `(?i)^[-.]?(alpha|beta|rc|pre|preview|dev|nightly|snapshot|canary)\.?\d*`, so it also matches `go1.28rc1` and `1.0.0beta2`.
+  - `prerelease_pattern` is overridable per repo.
+- **Unrecognized tags** with no numeric version component, such as `latest` or `stable`, are `skipped`, unless the repo's `tag_pattern` explicitly matches them. Those tags are then ordered by date only.
 
 ### 3.2 Resolve notes
 
@@ -77,9 +101,21 @@ This step produces the raw text the LLM sees. It is deterministic and unit-teste
 | Release with a substantive body | The release body (Markdown) |
 | Release body empty, under ~40 chars, or matching `see (the )?changelog\|CHANGELOG\.md` | The matching section of the changelog file |
 | Tag only | The matching section of the changelog file |
-| No changelog section found | Commit subjects from `GET /compare/{prev}...{tag}`, capped at 100, with merge commits and `chore(deps)`/bot authors dropped |
+| No changelog section found, predecessor known | Commit subjects from `GET /compare/{prev}...{tag}`, capped at 100, with merge commits and `chore(deps)`/bot authors dropped |
+| None of the above | **No notes**: no LLM call. The item is published deterministically as "{repo} {version} released — no release notes published", with links (state `no_notes`) |
 
-**Changelog lookup:** the path is configurable per repo, with a default search of `CHANGELOG.md`, `CHANGES.md`, `HISTORY.md` and `NEWS.md` at the tag's ref. The section is found by scanning Markdown headings (`#`–`###`) for the version with or without a leading `v`. It runs to the next heading of the same or higher level. Fetched files are cached per (repo, ref).
+The compare fallback is also treated as "none of the above" in four cases: the predecessor is unknown (a repo's first version), either ref is gone (404), the comparison is diverged or has more than 250 commits (an unrelated predecessor is likely), or every commit is filtered out as noise.
+
+**Changelog lookup:** the path is configurable per repo, with a default search of `CHANGELOG.md`, `CHANGES.md`, `HISTORY.md` and `NEWS.md` at the tag's ref. The section is found by scanning Markdown headings for the version, with or without a leading `v`. Both ATX headings (`#`–`###`) and setext headings (a line underlined with `===` or `---`, treated as levels 1 and 2) count. The section runs to the next heading of the same or higher level. Fetched files are cached per (repo, ref).
+
+#### 3.2.1 Predecessor selection
+
+`prev_tag` is used for the compare fallback, the "Diff since" link and the prompt's context. Its value is chosen deterministically from stored rows, including `skipped` ones:
+
+1. Candidates are only versions in the **same stream prefix** (§3.1.1). That keeps monorepo package tags from crossing.
+2. For SemVer-parsed versions, the predecessor is the **highest version lower than this one** by SemVer precedence. That handles maintenance branches: the predecessor of `1.2.4` is `1.2.3` even when `2.0.0` shipped in between. A stable release skips pre-release candidates, so `1.3.0` compares against `1.2.x`, not `1.3.0-rc.2`. A pre-release considers every candidate.
+3. For date-ordered (unrecognized) tags, the predecessor is the latest one in the same stream published before this one.
+4. If there is no candidate, `prev_tag` is empty: no compare fallback and no diff link.
 
 **Input budget:** notes are truncated to `llm.max_input_chars` (default 24,000) at a heading or line boundary, with a "[truncated]" marker. Some changelogs, Kubernetes for example, are enormous.
 
@@ -102,9 +138,26 @@ The resolved text, its source (`release_body` / `changelog` / `compare`) and its
   ```
   Each list is capped at 6 entries. The prompt says to omit dependency bumps, CI or docs-only changes, and contributor thank-yous. `noise_only: true` means "nothing user-facing", which renders as a one-line item instead of being hidden, so the feed still shows the version shipped.
 - **Prompt:** a built-in default ships in the binary, and `llm.prompt_file` can override it. The prompt gets the repo, the version, the previous version (when known) and the notes source.
-- **Caching:** the summary key is `sha256(prompt_version ‖ model ‖ notes_hash)`. If a key already exists, for example after a force-pushed tag with identical notes or when two repos share notes, it's reused. Changing the model or prompt does **not** re-summarize published items unless `release-digest resummarize` is run explicitly.
-- **Concurrency and retries:** `llm.concurrency` (default 2), exponential backoff on 429 and 5xx. A release that keeps failing stays `pending`, and its `attempts` and `last_error` are recorded.
-- **Fallback:** if a release is still unsummarized `llm.publish_after` (default 6h) after it was first seen, it is published with a deterministic fallback: the first ~600 chars of the notes as plain text, plus a note that the summary failed. When the LLM later succeeds, the item's content is updated, but its GUID and pubDate stay the same.
+- **Caching:** the summary key is the SHA-256 of a canonical JSON document holding everything that shapes the output:
+  - `base_url` and `model`
+  - `temperature`
+  - the response schema version
+  - the **fully rendered request messages**, which embed the effective prompt text (built-in or the *contents* of `prompt_file`), the repo, the version, `prev_tag`, the notes source and the notes themselves
+
+  Two releases share a summary only if the LLM would have seen byte-identical requests. Editing `prompt_file` or switching model changes the key for *future* summaries. The scheduler only summarizes releases that are eligible (see the state table below), so published `summarized` items aren't re-billed. `release-digest resummarize` forces it.
+- **Concurrency and retries:** `llm.concurrency` (default 2). Within one attempt, the client retries 429 and 5xx up to 3 times with jittered exponential backoff. A failed attempt increments `attempts` and records `last_error`. It also sets `next_attempt_at = now + min(15m × 2^attempts, 24h)`, so a broken LLM isn't hammered every tick. Backoff state is persisted and survives restarts.
+
+**Release states.** Eligibility for the summarize pass comes from this table, and nowhere else:
+
+| State | In feed? | Summarize-eligible? | Transitions |
+|---|---|---|---|
+| `skipped` | no | no | terminal: backfill, filter or catch-up overflow |
+| `pending` | no | yes, when `next_attempt_at ≤ now` | → `summarized` on success; → `fallback` at render time once `now − first_seen_at ≥ llm.publish_after` (default 6h); → `no_notes` when notes resolve to none |
+| `fallback` | yes, excerpt | yes, when `next_attempt_at ≤ now` and `now − first_seen_at < 7d` | → `summarized` on success; content updates, identity doesn't |
+| `summarized` | yes | no | → re-summarized only by `resummarize` |
+| `no_notes` | yes, deterministic | no | terminal (a later poll that finds new notes resets it to `pending`) |
+
+A fallback item shows the first ~600 chars of the notes as plain text, plus a note that the summary is pending. Milestone 2 (§10) publishes through this same `fallback` path, so items from before LLM support was built are upgraded automatically once milestone 4 lands. No migration is needed.
 
 ### 3.4 Store
 
@@ -144,6 +197,7 @@ feed:
 schedule:
   interval: 1h       # RELEASE_DIGEST_SCHEDULE_INTERVAL
   jitter: 5m
+  pass_budget: 15m   # whole-tick deadline; render always runs (§3)
 
 github:
   api_url: https://api.github.com          # GHES works too
@@ -159,6 +213,7 @@ llm:
   temperature: 0.2
   timeout: 120s
   concurrency: 2
+  max_per_pass: 20
   max_input_chars: 24000
   publish_after: 6h
   # prompt_file: /config/prompt.md
@@ -167,7 +222,9 @@ defaults:                                  # applied to every repo
   sources: [releases, tags]                # tags used only if no releases exist
   include_prereleases: false
   backfill: 3
+  max_pages: 5                             # catch-up pagination cap (§3.1)
   changelog: auto                          # or a path, or "off"
+  # prerelease_pattern: overrides the default tag classifier (§3.1.1)
 
 repos:
   - repo: golang/go
@@ -182,18 +239,19 @@ repos:
 
 ### 4.3 Secrets
 
-There are two secrets, and each has the same lookup order. The first source that is set wins:
+Each secret can come from exactly **one** of three sources:
 
-| Secret | 1. File path in env | 2. Default Docker secret file | 3. Plain env (dev convenience) |
+| Secret | File path in env | Default Docker secret file | Plain env (dev convenience) |
 |---|---|---|---|
 | LLM API key (e.g. OpenRouter) | `LLM_API_KEY_FILE` | `/run/secrets/llm_api_key` | `LLM_API_KEY` |
 | GitHub token | `GITHUB_TOKEN_FILE` | `/run/secrets/github_token` | `GITHUB_TOKEN` |
 
 Rules:
 
-- **`*_FILE` is the standard Docker convention**, the same one the official Postgres and MySQL images use. Setting both `X` and `X_FILE` is a startup error, so it's never ambiguous which one is in use.
-- **Default secret path:** if neither env var is set but `/run/secrets/<name>` exists, it's used. A compose `secrets:` entry therefore works without any env wiring at all.
-- **File handling:** the file is read once at startup. Surrounding whitespace and the trailing newline (which `echo > file` leaves) are trimmed. A file that's missing, empty or unreadable when its path was set explicitly is a fatal error naming the path. The value is never echoed.
+- **One source, or a startup error.** A source counts as present if its env var is set (even to an empty string) or, for the default path, if the file exists. If more than one source is present, startup fails with a message naming each one, for example `LLM_API_KEY and /run/secrets/llm_api_key are both set; remove one`. There's no precedence to remember, and a stale env var can't silently shadow a mounted secret.
+- **No source** is fine for both secrets. GitHub then runs unauthenticated at 60 req/h with a startup warning, and the LLM sends no `Authorization` header, which suits local Ollama. `config lint` warns when `base_url` isn't a loopback or private address and there's no key.
+- **`*_FILE` is the standard Docker convention**, the same one the official Postgres and MySQL images use. The default path means a compose `secrets:` entry works without any env wiring at all.
+- **File handling** is the same for explicit and default paths. The file is read once at startup, and surrounding whitespace and the trailing newline (which `echo > file` leaves) are trimmed. A file that's empty after trimming, unreadable, or (for `*_FILE`) missing is a fatal error naming the path. Plain env set to an empty string is also fatal. The value is never echoed.
 - **Rotation:** `SIGHUP`, or restarting the container, re-reads secret files. No polling.
 - **Never leaked:** secret values are held in a `secret.String` type whose `String()`, `GoString()`, `MarshalJSON()` and `LogValue()` (for slog) all return `[redacted]`. HTTP clients set `Authorization` from it at request time. Error messages from the LLM and GitHub clients strip the request headers before wrapping. `config lint` and the startup log report only the **source** of each secret, for example `llm api key: file /run/secrets/llm_api_key (51 bytes)`.
 - **Not in YAML:** the config loader rejects `api_key` / `token` keys in the YAML with a message pointing to §4.3, so a key can't end up committed to `deploy/`.
@@ -205,10 +263,10 @@ Rules:
 
 ## 5. Identity and timestamps
 
-- **GUID:** `urn:release-digest:{owner}/{repo}@{tag}`, with `isPermaLink="false"`. It is stable across renames of the release title.
+- **GUID:** a UUIDv5 of `{owner}/{repo}@{tag}`, with the repo lowercased and the tag exact. It uses a fixed namespace UUID compiled into the binary. RSS emits it with `isPermaLink="false"`, and Atom emits `urn:uuid:{uuid}`. It is stable across renames of the release title, and it's exactly the shape feed-me's `feed.AtomID` already produces (`feed-me/internal/feed/atom.go:65`), so the renderer ports unchanged. A UUID can't come out malformed whatever characters a tag contains (`/`, `+`, unicode). The golden-feed tests include such tags.
 - **pubDate:** the release's `published_at`, or the tag commit's committer date for tag-only repos. Once stored, it is frozen (feed-me §5). A release that's deleted and re-created with the same tag keeps its original item.
 - **Ordering:** by pubDate descending. Backfilled releases keep their real dates, so they sort into the past rather than flooding the top of the feed.
-- **Deleted releases:** these are marked `missing_since` and dropped from the feed after 7 days, in case the deletion is a re-publish in progress.
+- **Deleted releases:** these are marked `missing_since` only after a confirmed 404 (§3.1, Deletion detection). They're dropped from the feed after 7 days, in case the deletion is a re-publish in progress.
 
 ---
 
@@ -325,28 +383,34 @@ testdata/                recorded GitHub API responses, changelog fixtures, gold
 CREATE TABLE releases (
   repo           TEXT NOT NULL,            -- owner/repo, lowercased
   tag            TEXT NOT NULL,
+  guid           TEXT NOT NULL UNIQUE,     -- UUIDv5 (§5)
   kind           TEXT NOT NULL,            -- release | tag
   name           TEXT NOT NULL DEFAULT '',
   html_url       TEXT NOT NULL,
-  prev_tag       TEXT NOT NULL DEFAULT '',
+  stream         TEXT NOT NULL DEFAULT '', -- tag prefix (§3.1.1)
+  version        TEXT NOT NULL DEFAULT '', -- normalized SemVer, '' if date-ordered
+  prev_tag       TEXT NOT NULL DEFAULT '', -- §3.2.1
   prerelease     INTEGER NOT NULL DEFAULT 0,
   published_at   INTEGER NOT NULL,         -- Unix ms, frozen on insert
   first_seen_at  INTEGER NOT NULL,
-  state          TEXT NOT NULL,            -- pending | summarized | fallback | skipped
+  state          TEXT NOT NULL,            -- skipped | pending | fallback | summarized | no_notes (§3.3)
   notes_source   TEXT NOT NULL DEFAULT '', -- release_body | changelog | compare
   notes_hash     TEXT NOT NULL DEFAULT '',
   summary_key    TEXT,                     -- → summaries.key
   attempts       INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER,
   last_error     TEXT NOT NULL DEFAULT '',
   missing_since  INTEGER,
   PRIMARY KEY (repo, tag)
 );
 CREATE INDEX releases_feed ON releases (state, published_at DESC);
+CREATE INDEX releases_work ON releases (state, next_attempt_at, first_seen_at);
+CREATE INDEX releases_stream ON releases (repo, stream);
 
 CREATE TABLE notes (hash TEXT PRIMARY KEY, text TEXT NOT NULL);
 
 CREATE TABLE summaries (
-  key          TEXT PRIMARY KEY,           -- sha256(prompt_version‖model‖notes_hash)
+  key          TEXT PRIMARY KEY,           -- sha256 of canonical request (§3.3)
   model        TEXT NOT NULL,
   json         TEXT NOT NULL,
   created_at   INTEGER NOT NULL,
@@ -354,7 +418,9 @@ CREATE TABLE summaries (
 );
 
 CREATE TABLE http_cache (url TEXT PRIMARY KEY, etag TEXT, body BLOB, fetched_at INTEGER);
-CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_success_at INTEGER, last_error TEXT DEFAULT '');
+CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_success_at INTEGER,
+                         is_private INTEGER, visibility_checked_at INTEGER, last_error TEXT DEFAULT '');
+CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- e.g. poll round-robin cursor
 CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at INTEGER);
 ```
 
@@ -362,10 +428,21 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
 
 ## 9. Testing strategy
 
-- **github:** `httptest` server replaying recorded responses, covering pagination, 304s, rate-limit headers, repos with no releases and repos with draft releases.
-- **notes:** table tests over real changelog fixtures with different heading styles (Keep a Changelog, `## v1.2.3 (2026-01-01)`, `# [1.2.3](link)`, setext headings) and the "see changelog" heuristics.
+- **github:** `httptest` server replaying recorded responses, covering:
+  - pagination and catch-up past page 1
+  - 304s and rate-limit headers, including an early stop and cursor resume
+  - repos with no releases and repos with draft releases
+  - private repos being refused
+  - deletion detection: a release that ages off page 1 is **not** a candidate, a candidate with a 404 is marked, and a candidate whose check errors or hits a rate limit is left alone
+- **version:** table tests of classification and predecessor selection:
+  - `v2.0.0-rc.1`, `go1.28rc1`, `1.0.0beta2`, `service/api/v1.4.0`, `latest`
+  - a maintenance-branch `1.2.4` after `2.0.0`
+  - a stable release after its RCs
+  - a repo's first version
+- **notes:** table tests over real changelog fixtures with different heading styles (Keep a Changelog, `## v1.2.3 (2026-01-01)`, `# [1.2.3](link)`, setext `===`/`---`) and the "see changelog" heuristics. Also the compare-fallback edge cases: no predecessor, 404, diverged or too large, all noise → `no_notes`.
 - **llm:** a fake OpenAI-compatible server that exercises the `json_schema` → `json_object` → prompt-only fallback, malformed JSON with a repair retry, 429 backoff and timeouts.
-- **summarize:** cache-key reuse, `publish_after` fallback, then a later upgrade that keeps the GUID and pubDate.
+- **summarize:** the cache key differs when only the repo, version, `prev_tag` or `prompt_file` *contents* differ, and matches for byte-identical requests. Also the state machine: `pending` → `fallback` at render time even while the LLM is down, `fallback` → `summarized` after the LLM recovers across a restart, keeping the GUID and pubDate. `next_attempt_at` backoff is persisted.
+- **scheduler:** with a fake GitHub that hangs and a fake LLM that fails, the tick still renders within `pass_budget`, expired fallbacks are published, and the next tick resumes polling at the cursor.
 - **secret:** a table test of the lookup order, both `X` and `X_FILE` set is an error, trailing-newline trimming, missing or empty files, and redaction under `fmt` `%v`/`%+v`/`%#v`, `slog` and `json.Marshal`. A test also asserts that an LLM 401 error message doesn't contain the key.
 - **feed:** golden RSS/Atom files, local spec checks, and `make validate` against W3C (not in every CI run).
 - **End-to-end:** `build` against a fixture GitHub and a fake LLM produces the golden feed byte for byte.
@@ -374,8 +451,8 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
 
 ## 10. Milestones
 
-1. **Skeleton.** Copy in feed-me's config loading, store, feed, scheduler, server and Dockerfile, renamed. `run` serves an empty valid feed.
-2. **GitHub poll.** Releases, tags, filtering, backfill, ETag cache, rate-limit pacing. Items are published with raw notes and no LLM yet.
+1. **Skeleton.** Copy in feed-me's config loading, store, feed, scheduler, server and Dockerfile, renamed. Add the secret loader (§4.3) and UUIDv5 GUIDs (§5). `run` serves an empty valid feed, and a golden test confirms the Atom IDs are well-formed `urn:uuid:` values.
+2. **GitHub poll.** Public check, releases, tags, version classification, predecessor selection, filtering, backfill, catch-up, deletion detection, ETag cache, rate-limit pacing and pass budget. Releases go through the `pending` → `fallback` path (§3.3), so items appear with raw-note excerpts and get upgraded automatically in milestone 4.
 3. **Notes resolution.** Changelog section extraction, compare fallback, truncation.
 4. **LLM summaries.** Client, schema, fallbacks, cache, `summarize` dry-run command, rendered item format.
 5. **Hardening.** `config lint`, `resummarize`, deleted-release handling, W3C validation, compose with the Ollama profile, README.
@@ -393,12 +470,14 @@ Milestone 2 alone is already a useful aggregated releases feed, which makes it a
 - One combined feed.
 - A structured TL;DR (headline / breaking / features / fixes / security) with a link to the full notes.
 - Project name `release-digest`, a Go module, living in `~/dev/release-digest`.
-- Secrets are supported through Docker secrets: `*_FILE` env vars and `/run/secrets/<name>` defaults, with plain env as a fallback. Secrets in YAML are rejected. OpenRouter is the documented default LLM endpoint.
+- Secrets are supported through Docker secrets: `*_FILE` env vars and `/run/secrets/<name>` defaults, with plain env for dev. Exactly one source may be present, otherwise it's a startup error. Secrets in YAML are rejected. OpenRouter is the documented default LLM endpoint.
+- **Public repositories only** in v1. Private repos are detected and refused (§3.1).
+- After the first roborev review: the summary cache is keyed on the full canonical request, there's an explicit release state machine with fallback retries, deletions need a confirmed 404, tag pre-releases and predecessors are classified within a stream, scheduler passes are bounded and fair, and GUIDs are UUIDv5.
 
 ## 12. Open questions
 
 1. **Should the env repo list *merge* with YAML or *replace* it?** The plan says merge. Replace is simpler to reason about when the env var is set from compose.
 2. **Should noise-only releases** (pure dependency bumps) appear as one-liners (current plan) or be hidden entirely, perhaps behind a per-repo `hide_noise: true`?
 3. **Which OpenRouter model** should be the example default? `anthropic/claude-haiku-5.5` is a placeholder. Pick whichever slug you'll actually run. This only affects docs and examples.
-4. **Should one GitHub release that bundles several packages** be split per package? Monorepos like `aws-sdk-go-v2` tag dozens of modules at once. For v1 the plan uses `tag_pattern` to pick one, and per-package splitting is deferred.
+4. **Should one GitHub release that bundles several packages** be split per package? Monorepos like `aws-sdk-go-v2` tag dozens of modules at once. In v1, stream prefixes (§3.1.1) keep predecessors correct, and `tag_pattern` picks which streams to follow. Splitting one release *body* across packages is deferred.
 5. **Should there be per-repo feeds later?** The GUID and categories already allow it, and it would be a renderer-only change.

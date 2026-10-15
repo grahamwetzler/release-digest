@@ -76,7 +76,7 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 
 For each repo:
 
-0. **Public check, every poll, fail-closed.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` **before every poll** of that repo. When authenticated, an unchanged repo is a 304 and costs no rate limit. The repo is fetched only if this tick's response (or its validated 304) says `private: false`. If the response says `private: true`, or the check fails for any reason (error, timeout, rate limit), nothing else is fetched for that repo this tick.
+0. **Public check, every poll, fail-closed.** `GET /repos/{owner}/{repo}` runs with `If-None-Match` **before every poll** of that repo. The tick's visibility sweep (§3) is this check: a repo is polled only if the sweep confirmed it in the same tick. When authenticated, an unchanged repo is a 304 and costs no rate limit. The repo is fetched only if this tick's response (or its validated 304) says `private: false`. If the response says `private: true`, or the check fails for any reason (error, timeout, rate limit), nothing else is fetched for that repo this tick.
    - On `private: true` **or a 404** (a repo that's gone private looks like a 404 to a token without access), the repo is marked **held** in `repo_state` and an error is logged. `config lint` fails on it. Holding is **not terminal**: rows keep their state, and nothing is moved to `skipped` or cancelled.
    - **Processing gate (strict).** Any action that would newly expose a repo's content has to pass two checks:
 
@@ -96,7 +96,12 @@ So the exposure window is the few seconds between a just-in-time check and the r
    - **Already-published items** stay in the feed exactly as they are, since they were public when published.
    - **Recovery.** When a held repo passes a check again, it's simply un-held. Its `pending` rows resume, and queued alerts are delivered if still within `max_age`. Normal and daily scans pick up anything released meanwhile, because the scan boundary didn't advance while the repo was held.
 1. `GET /repos/{owner}/{repo}/releases?per_page=30` (page 1) with `If-None-Match`. When authenticated, a 304 doesn't count against the rate limit.
-2. If the repo has **no releases** (or `sources: [tags]` is set), call `GET /repos/{owner}/{repo}/tags?per_page=30`. New tag rows are inserted with `published_at` unset. Their commit dates are resolved afterwards from a persisted **metadata queue**: `GET /repos/{owner}/{repo}/commits/{sha}`, cached forever, drained within the poll budget, at most 30 per tick. A tag row isn't eligible for summarizing or rendering until its date is resolved, and the date is frozen once set. Deletion existence checks (below) are a separate bounded queue too. So the atomic list fetch is only list requests.
+2. If the repo has **no releases** (or `sources: [tags]` is set), call `GET /repos/{owner}/{repo}/git/matching-refs/tags/` with `If-None-Match`. This returns **every** tag in one unpaginated response (golang/go: ~500 tags; kubernetes: ~1,250 tags, 520 KB), and an unchanged list is a 304. The paginated `/tags` list can't be used: GitHub sorts it by name, not date, so golang/go's page 1 is all `weekly.2011-*` tags and `v1.9.0` sorts above `v1.10.0`. Because the list is complete, any tag not stored is new (`origin = live`), and tag-only repos need no scan boundary, catch-up or reconciliation (steps 3 below apply to the releases list only). On first sight, the newest `backfill` versions are the **highest** by SemVer precedence, since the list has no dates. Date-ordered (unparsed) tags can't be ranked then and are skipped. New tag rows are inserted with `published_at` unset. Their dates are resolved afterwards from a persisted **metadata queue**, cached forever, drained within the poll budget, at most 30 per tick:
+   - a lightweight tag gets its commit's committer date, from `GET /repos/{owner}/{repo}/commits/{sha}`;
+   - an annotated tag gets its tagger date, from `GET /repos/{owner}/{repo}/git/tags/{sha}`, which is when it was actually tagged.
+
+   The queue is ordered by last attempt (`meta_attempted_at`), so lookups that keep failing rotate to the back. Skipped rows with a parsed version are never dated, since nothing shows them and SemVer predecessors don't need dates.
+   - **Switching lists.** `repo_state.scan_mode` records which list the last completed scan read. When a repo switches, because its releases were all deleted or it published its first release, the new list gets first-sight treatment (`origin = backfill`, only `backfill` versions queued). Otherwise years of old tags, or up to `max_pages` of old releases, would flood the feed. A tag row isn't eligible for summarizing or rendering until its date is resolved, and the date is frozen once set. Deletion existence checks (below) are a separate bounded queue too. So the atomic list fetch is only list requests.
 3. **Catch-up pagination (atomic).** Each repo persists a **scan boundary**: the newest tag of its last completed scan, stored in `repo_state.scan_boundary`. If page 1 doesn't contain the boundary, which happens after downtime or a burst of releases, pages 2…`max_pages` (default 5) are fetched back-to-back until the boundary appears, the cap is reached, or the list ends.
    - **All or nothing.** Results are buffered in memory and committed in one transaction only when the scan completes. Then the new rows are inserted and the boundary advances to the newest tag seen on page 1.
    - **On interruption** (an error, a rate limit, a restart), nothing is written and the boundary stays put. The next tick starts the scan again from page 1. With no stored mid-scan position, pagination shifts *between* ticks can't cause skips.
@@ -127,7 +132,7 @@ The only residual exposure is a repo flipping to private in the seconds between 
 
 **Deletion detection.** Disappearing from a list response is never enough to mark a release deleted: lists are paginated and windowed. Deletion is decided only by a **direct existence check**: `GET /repos/{o}/{r}/releases/tags/{tag}` for releases, or `GET /repos/{o}/{r}/git/ref/tags/{tag}` for tags, sent conditionally and recorded in `last_verified_at`. Two things trigger a check:
 
-1. **Window candidates (immediate).** A stored release newer than the oldest entry on page 1 but absent from page 1 should have been there, so it's checked in the same poll. If page 1 is empty, every stored published release of that repo is a candidate.
+1. **Window candidates (immediate).** A stored release newer than the oldest entry on page 1 but absent from page 1 should have been there, so it's checked in the same poll. If page 1 is empty, every stored published release of that repo is a candidate. For tag-only repos the list is complete, so every visible tag missing from it is a candidate. At most 30 are checked per poll, skipping ones already marked missing.
 2. **Rotating sweep (bounded).** Each tick, up to `github.verify_per_tick` (default 10) published releases across all repos are checked. They're ordered by `verify_attempted_at`, the time of the last *attempt* whatever its outcome, oldest first. This eventually catches deletions of releases that have aged out of the page-1 window. With 200 items and an hourly tick, every item gets an attempt within a day.
 
 **Outcomes:**
@@ -473,7 +478,7 @@ Rules:
 ## 5. Identity and timestamps
 
 - **GUID:** a UUIDv5 of `{owner}/{repo}@{tag}`, with the repo lowercased and the tag exact. It uses a fixed namespace UUID compiled into the binary. RSS emits it with `isPermaLink="false"`, and Atom emits `urn:uuid:{uuid}`. It is stable across renames of the release title, and it's exactly the shape feed-me's `feed.AtomID` already produces (`feed-me/internal/feed/atom.go:65`), so the renderer ports unchanged. A UUID can't come out malformed whatever characters a tag contains (`/`, `+`, unicode). The golden-feed tests include such tags.
-- **pubDate:** the release's `published_at`, or the tag commit's committer date for tag-only repos. Once stored, it is frozen (feed-me §5). A release that's deleted and re-created with the same tag keeps its original item.
+- **pubDate:** the release's `published_at`, or for tag-only repos the tagger date of an annotated tag or the commit's committer date of a lightweight one. Once stored, it is frozen (feed-me §5). A release that's deleted and re-created with the same tag keeps its original item.
 - **Updated time:** `content_updated_at` is set when an item first becomes visible, and advanced on every content change (§1, §3.3). It's passed to the renderer as `Item.Updated`, so Atom `<updated>` moves while `<published>` and the ID stay fixed, and readers that honor updates re-show the upgraded entry. RSS 2.0 has no per-item updated element. The new `<description>` is enough for readers that diff content.
 - **Ordering:** by pubDate descending. Backfilled releases keep their real dates, so they sort into the past rather than flooding the top of the feed.
 - **Deleted releases:** these are marked `missing_since` only after a confirmed 404 (§3.1, Deletion detection). They're dropped from the feed after 7 days, in case the deletion is a re-publish in progress.
@@ -630,6 +635,9 @@ CREATE TABLE releases (
   last_verified_at   INTEGER,              -- last successful existence check (§3.1)
   verify_attempted_at INTEGER,             -- last attempt, any outcome; sweep order
   missing_since  INTEGER,
+  ref_sha        TEXT NOT NULL DEFAULT '',  -- tags: the object refs/tags/<tag> points at
+  ref_type       TEXT NOT NULL DEFAULT '',  -- commit | tag (annotated)
+  meta_attempted_at INTEGER,                -- metadata queue order (§3.1 step 2)
   PRIMARY KEY (repo, tag)
 );
 CREATE INDEX releases_feed ON releases (state, published_at DESC);
@@ -651,6 +659,7 @@ CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_suc
                          held INTEGER NOT NULL DEFAULT 0, visibility_confirmed_at INTEGER,
                          visibility_confirmed_tick INTEGER,     -- tick ID of last successful public check (§3)
                          scan_boundary TEXT,          -- newest tag of last completed scan (§3.1)
+                         scan_mode TEXT,              -- release | tag: the list that scan read
                          reconcile_next_page INTEGER, last_reconciled_at INTEGER,
                          last_error TEXT DEFAULT '');
 CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- poll and sweep round-robin cursors

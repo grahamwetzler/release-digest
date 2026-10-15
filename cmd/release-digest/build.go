@@ -23,6 +23,10 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	defer e.store.Close()
+	if err := e.startGuard(ctx); err != nil {
+		fmt.Fprintf(stderr, "release-digest: %v\n", err)
+		return 1
+	}
 	if err := e.tick(ctx, nil); err != nil {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return 1

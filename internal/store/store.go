@@ -19,6 +19,36 @@ import (
 // build); HTTP handlers only read.
 type Store struct {
 	db *sql.DB
+	ops
+}
+
+// Tx is a transaction. It has the same row methods as Store.
+type Tx struct {
+	tx *sql.Tx
+	ops
+}
+
+// querier is what *sql.DB and *sql.Tx have in common.
+type querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// ops holds the row methods shared by Store and Tx.
+type ops struct{ q querier }
+
+// Tx runs fn in a transaction, committing only if it returns nil.
+func (s *Store) Tx(ctx context.Context, fn func(*Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(&Tx{tx: tx, ops: ops{tx}}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // migrations are applied in order; schema_version records how many have run.
@@ -123,6 +153,13 @@ var migrations = []string{
 		created_at       INTEGER NOT NULL,
 		sent_at          INTEGER
 	);`,
+	// 2: a tag's ref target, for the metadata queue that resolves its date,
+	// and the queue's last attempt, so failing items rotate to the back (§3.1).
+	`ALTER TABLE releases ADD COLUMN ref_sha TEXT NOT NULL DEFAULT '';  -- tags: what refs/tags/<tag> points at
+	ALTER TABLE releases ADD COLUMN ref_type TEXT NOT NULL DEFAULT ''; -- commit | tag (annotated)
+	ALTER TABLE releases ADD COLUMN meta_attempted_at INTEGER;
+	ALTER TABLE repo_state ADD COLUMN scan_mode TEXT NOT NULL DEFAULT '';  -- release | tag: the list last scanned
+	CREATE INDEX releases_undated ON releases (meta_attempted_at) WHERE published_at IS NULL;`,
 }
 
 // Open opens (creating if needed) the database at path and migrates it.
@@ -137,7 +174,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, ops: ops{db}}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrating %s: %w", path, err)
@@ -220,22 +257,29 @@ type Release struct {
 	ContentUpdated time.Time
 	MissingSince   time.Time
 	NextAttempt    time.Time
+	RefSHA         string // tags: the object refs/tags/<tag> points at
+	RefType        string // tags: commit, or tag for an annotated tag
+	NotesHash      string // → notes.hash
+	LastVerified   time.Time
+	VerifyAttempt  time.Time
 }
 
 const releaseColumns = `repo, tag, guid, kind, name, html_url, stream, version, prev_tag, prerelease,
-	published_at, first_seen_at, state, notes_source, origin, urgency, content_updated_at, missing_since, next_attempt_at`
+	published_at, first_seen_at, state, notes_source, origin, urgency, content_updated_at, missing_since, next_attempt_at,
+	ref_sha, ref_type, notes_hash, last_verified_at, verify_attempted_at`
 
 func scanRelease(row interface{ Scan(...any) error }) (*Release, error) {
 	var r Release
-	var published, contentUpdated, missing sql.NullInt64
+	var published, contentUpdated, missing, verified, attempted sql.NullInt64
 	var firstSeen, nextAttempt int64
 	err := row.Scan(&r.Repo, &r.Tag, &r.GUID, &r.Kind, &r.Name, &r.HTMLURL, &r.Stream, &r.Version, &r.PrevTag,
 		&r.Prerelease, &published, &firstSeen, &r.State, &r.NotesSource, &r.Origin, &r.Urgency, &contentUpdated,
-		&missing, &nextAttempt)
+		&missing, &nextAttempt, &r.RefSHA, &r.RefType, &r.NotesHash, &verified, &attempted)
 	if err != nil {
 		return nil, err
 	}
 	r.Published, r.ContentUpdated, r.MissingSince = fromNull(published), fromNull(contentUpdated), fromNull(missing)
+	r.LastVerified, r.VerifyAttempt = fromNull(verified), fromNull(attempted)
 	r.FirstSeen, r.NextAttempt = fromMS(firstSeen), fromMS(nextAttempt)
 	return &r, nil
 }
@@ -243,19 +287,20 @@ func scanRelease(row interface{ Scan(...any) error }) (*Release, error) {
 // InsertRelease adds a newly discovered release. A release already stored
 // under (repo, tag) is left unchanged, so published_at and the GUID stay
 // frozen (§5); it reports whether a row was inserted.
-func (s *Store) InsertRelease(ctx context.Context, r *Release) (bool, error) {
+func (s ops) InsertRelease(ctx context.Context, r *Release) (bool, error) {
 	if r.NextAttempt.IsZero() {
 		r.NextAttempt = r.FirstSeen // §3.3: due at once
 	}
 	if r.Urgency == "" {
 		r.Urgency = "none"
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO releases (`+releaseColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	res, err := s.q.ExecContext(ctx, `INSERT INTO releases (`+releaseColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (repo, tag) DO NOTHING`,
 		r.Repo, r.Tag, r.GUID, r.Kind, r.Name, r.HTMLURL, r.Stream, r.Version, r.PrevTag, r.Prerelease,
 		toNull(r.Published), toMS(r.FirstSeen), r.State, r.NotesSource, r.Origin, r.Urgency,
-		toNull(r.ContentUpdated), toNull(r.MissingSince), toMS(r.NextAttempt))
+		toNull(r.ContentUpdated), toNull(r.MissingSince), toMS(r.NextAttempt),
+		r.RefSHA, r.RefType, r.NotesHash, toNull(r.LastVerified), toNull(r.VerifyAttempt))
 	if err != nil {
 		return false, err
 	}
@@ -264,8 +309,8 @@ func (s *Store) InsertRelease(ctx context.Context, r *Release) (bool, error) {
 }
 
 // Release returns the stored release, or nil.
-func (s *Store) Release(ctx context.Context, repo, tag string) (*Release, error) {
-	r, err := scanRelease(s.db.QueryRowContext(ctx, `SELECT `+releaseColumns+` FROM releases WHERE repo = ? AND tag = ?`, repo, tag))
+func (s ops) Release(ctx context.Context, repo, tag string) (*Release, error) {
+	r, err := scanRelease(s.q.QueryRowContext(ctx, `SELECT `+releaseColumns+` FROM releases WHERE repo = ? AND tag = ?`, repo, tag))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -285,6 +330,10 @@ func (s *Store) FeedReleases(ctx context.Context, n int, now time.Time) ([]*Rele
 	if err != nil {
 		return nil, err
 	}
+	return scanReleases(rows)
+}
+
+func scanReleases(rows *sql.Rows) ([]*Release, error) {
 	defer rows.Close()
 	var out []*Release
 	for rows.Next() {
@@ -346,9 +395,9 @@ func (s *Store) PutRenderedAll(ctx context.Context, feeds map[string]*Rendered) 
 }
 
 // State returns a scheduler_state value, or "" if unset.
-func (s *Store) State(ctx context.Context, key string) (string, error) {
+func (s ops) State(ctx context.Context, key string) (string, error) {
 	var v string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM scheduler_state WHERE key = ?`, key).Scan(&v)
+	err := s.q.QueryRowContext(ctx, `SELECT value FROM scheduler_state WHERE key = ?`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -356,8 +405,8 @@ func (s *Store) State(ctx context.Context, key string) (string, error) {
 }
 
 // SetState replaces a scheduler_state value.
-func (s *Store) SetState(ctx context.Context, key, value string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO scheduler_state (key, value) VALUES (?, ?)
+func (s ops) SetState(ctx context.Context, key, value string) error {
+	_, err := s.q.ExecContext(ctx, `INSERT INTO scheduler_state (key, value) VALUES (?, ?)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
 }

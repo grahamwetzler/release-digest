@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -30,22 +31,48 @@ const (
 
 const stateLastTick = "last_tick"
 
-// tick runs one scheduler pass. In milestone 1 that is only the render;
-// poll and summarize slot in before it (§3). last_tick is recorded only
-// after a successful pass, so a restart after a failed one retries at once.
+// guardTimeout bounds the token guard run for a SIGHUP rotation.
+const guardTimeout = 30 * time.Second
+
+// tick runs one scheduler pass: the visibility sweep and poll (once the
+// token guard has passed), the gated promotion of due fallbacks, and the
+// render, which always runs (§3). last_tick is recorded only after a fully
+// successful pass, so a restart after a failed one retries at once.
 func (e *env) tick(ctx context.Context, srv *server.Server) error {
 	start := time.Now()
+	id, err := e.poller.NextTick(ctx)
+	if err != nil {
+		return fmt.Errorf("allocating a tick: %w", err)
+	}
+	var errs []error
+	if err := e.checkGuard(ctx); err == nil {
+		if err := e.poller.Sweep(ctx, id); err != nil {
+			errs = append(errs, fmt.Errorf("visibility sweep: %w", err))
+		}
+		if err := e.poller.Poll(ctx, id); err != nil {
+			errs = append(errs, fmt.Errorf("poll: %w", err))
+		}
+	} else if isGuardError(err) {
+		errs = append(errs, err)
+	}
+	promoted, err := e.poller.Promote(ctx, id)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("promotion: %w", err))
+	}
 	feeds, err := render.Publish(ctx, e.store, e.cfg, generator(), start)
 	if err != nil {
-		return fmt.Errorf("render: %w", err)
+		return errors.Join(append(errs, fmt.Errorf("render: %w", err))...)
 	}
 	if srv != nil {
 		srv.Set(feeds)
 	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
 	if err := e.store.SetStateTime(ctx, stateLastTick, start); err != nil {
 		return fmt.Errorf("recording the tick: %w", err)
 	}
-	e.log.Info("tick done", "took", time.Since(start).Round(time.Millisecond))
+	e.log.Info("tick done", "tick", id, "published", promoted, "took", time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
@@ -64,6 +91,10 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	}
 	defer e.store.Close()
 	c := e.cfg
+	if err := e.startGuard(ctx); err != nil {
+		fmt.Fprintf(stderr, "release-digest: %v\n", err)
+		return 1
+	}
 
 	srv := server.New(c.Feed.Title, c.PublicBaseURL, e.log)
 	if err := srv.Load(ctx, e.store); err != nil {
@@ -156,7 +187,18 @@ func (e *env) reloadSecrets(env secret.Env) {
 		e.log.Error("SIGHUP: secrets not reloaded; keeping the current ones", "err", err)
 		return
 	}
-	// TODO(milestone 2): run the token guard on a new GitHub token before activating it (§3.1).
+	// A replacement GitHub token must pass the token guard before it is
+	// activated; if it fails or can't be checked, nothing is reloaded (§3.1).
+	newTok := loaded[1].Value
+	if newTok.Reveal() != e.secrets.GitHub.Get().Value.Reveal() {
+		ctx, cancel := context.WithTimeout(context.Background(), guardTimeout)
+		defer cancel()
+		if err := e.gh.Guard(ctx, newTok); err != nil {
+			e.log.Error("SIGHUP: the new GitHub token was not accepted; keeping the current secrets", "err", err)
+			return
+		}
+		e.guardOK.Store(true)
+	}
 	e.secrets.LLM.Set(loaded[0])
 	e.secrets.GitHub.Set(loaded[1])
 	e.secrets.Ntfy.Set(loaded[2])

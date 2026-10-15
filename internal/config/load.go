@@ -532,6 +532,9 @@ func (v *validator) repoOptions(at []any, o *RepoOptions, def *RepoOptions) {
 		if o.TagPattern == nil {
 			o.TagPattern = def.TagPattern
 		}
+		if o.ExcludePattern == nil {
+			o.ExcludePattern = def.ExcludePattern
+		}
 		if o.PrereleasePattern == nil {
 			o.PrereleasePattern = def.PrereleasePattern
 		}
@@ -562,7 +565,7 @@ func (v *validator) repoOptions(at []any, o *RepoOptions, def *RepoOptions) {
 	for _, re := range []struct {
 		key string
 		r   *Regex
-	}{{"tag_pattern", o.TagPattern}, {"prerelease_pattern", o.PrereleasePattern}} {
+	}{{"tag_pattern", o.TagPattern}, {"exclude_pattern", o.ExcludePattern}, {"prerelease_pattern", o.PrereleasePattern}} {
 		if re.r != nil && re.r.Re == nil {
 			if err := re.r.compile(); err != nil {
 				v.err(append(at, re.key), "%v", err)

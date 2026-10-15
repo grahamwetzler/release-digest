@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"io"
+	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +15,9 @@ import (
 	"time"
 
 	"release-digest/internal/feed"
+	"release-digest/internal/github"
+	"release-digest/internal/github/githubtest"
+	"release-digest/internal/secret"
 )
 
 // syncBuffer is a bytes.Buffer safe for the run goroutine's logger.
@@ -186,5 +191,49 @@ func TestLocalURL(t *testing.T) {
 		if got := localURL(u); got != want {
 			t.Errorf("localURL(%s) = %v", u, got)
 		}
+	}
+}
+
+func TestSIGHUPGuardsAReplacementToken(t *testing.T) {
+	gh := githubtest.New()
+	defer gh.Close()
+	var logs syncBuffer
+	envWith := func(token string) secret.Env {
+		return secret.Env{
+			LookupEnv: func(k string) (string, bool) { return token, k == "GITHUB_TOKEN" },
+			ReadFile:  os.ReadFile,
+			Stat:      func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist },
+		}
+	}
+	initial, err := loadSecrets(envWith("ghp_old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &env{log: slog.New(slog.NewTextHandler(&logs, nil)), secrets: secrets{
+		LLM: secret.NewValue(initial[0]), GitHub: secret.NewValue(initial[1]), Ntfy: secret.NewValue(initial[2]),
+	}}
+	e.gh = &github.Client{BaseURL: gh.URL, HTTP: http.DefaultClient, UserAgent: "test",
+		Token: func() secret.String { return e.secrets.GitHub.Get().Value }}
+	e.guardOK.Store(true)
+
+	gh.Scopes = "repo"
+	e.reloadSecrets(envWith("ghp_new"))
+	if got := e.secrets.GitHub.Get().Value.Reveal(); got != "ghp_old" {
+		t.Errorf("a rejected token was activated: %q", got)
+	}
+	if !strings.Contains(logs.String(), "new GitHub token was not accepted") {
+		t.Errorf("no error logged:\n%s", logs.String())
+	}
+	if gh.Auth[len(gh.Auth)-1] != "Bearer ghp_new" {
+		t.Errorf("the guard did not check the replacement token: %v", gh.Auth)
+	}
+
+	gh.Scopes = "public_repo"
+	e.reloadSecrets(envWith("ghp_new"))
+	if got := e.secrets.GitHub.Get().Value.Reveal(); got != "ghp_new" {
+		t.Errorf("an accepted token was not activated: %q", got)
+	}
+	if strings.Contains(logs.String(), "ghp_") {
+		t.Errorf("token logged:\n%s", logs.String())
 	}
 }

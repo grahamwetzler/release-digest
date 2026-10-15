@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"regexp"
 	"strings"
 	"time"
 
@@ -47,9 +48,13 @@ func Channel(c *config.Config, f Format, generator string) feed.Channel {
 	}
 }
 
-// Item turns a stored release into a feed item. Until summaries exist
-// (milestone 4) the body is a link to the release notes.
-func Item(r *store.Release) feed.Item {
+// ExcerptChars is how much of the notes a fallback item shows (§3.3).
+const ExcerptChars = 600
+
+// Item turns a stored release into a feed item. notes is the release's
+// resolved notes text, if any. Until summaries exist (milestone 4) every
+// visible item is a fallback: an excerpt of the notes and a link to them.
+func Item(r *store.Release, notes string) feed.Item {
 	version := r.Tag
 	if r.Name != "" && r.Name != r.Tag {
 		version = r.Name
@@ -60,22 +65,59 @@ func Item(r *store.Release) feed.Item {
 		title += " (pre-release)"
 		cats = append(cats, "prerelease")
 	}
-	notes := "Release notes"
+	link := "Release notes"
 	if r.Kind == "tag" {
-		notes = "Tag"
+		link = "Tag"
 	}
-	body := fmt.Sprintf(`<p><a href="%s">%s</a> for %s %s.</p>`,
-		html.EscapeString(r.HTMLURL), notes, html.EscapeString(r.Repo), html.EscapeString(r.Tag))
+	excerpt := feed.Excerpt(PlainText(notes), ExcerptChars)
+	desc := fmt.Sprintf("%s for %s %s.", link, r.Repo, r.Tag)
+	var body strings.Builder
+	if excerpt != "" {
+		desc = excerpt
+		fmt.Fprintf(&body, "<p>%s</p>\n", html.EscapeString(excerpt))
+		link = "Full release notes"
+	}
+	fmt.Fprintf(&body, `<p><a href="%s">%s</a></p>`, html.EscapeString(r.HTMLURL), link)
+	if r.State == store.StateFallback {
+		body.WriteString("\n<p><small>Summary pending.</small></p>")
+	}
 	return feed.Item{
 		Title:       title,
 		Link:        r.HTMLURL,
 		GUID:        r.GUID,
-		Description: fmt.Sprintf("%s for %s %s.", notes, r.Repo, r.Tag),
-		ContentHTML: body,
+		Description: desc,
+		ContentHTML: body.String(),
 		Categories:  cats,
 		Published:   r.Published,
 		Updated:     r.ContentUpdated,
 	}
+}
+
+// Markdown syntax PlainText removes.
+var (
+	mdFence    = regexp.MustCompile("(?m)^\\s*(```|~~~).*$")
+	mdImage    = regexp.MustCompile(`!\[([^\]]*)\]\([^)]*\)`)
+	mdLink     = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	mdRefLink  = regexp.MustCompile(`\[([^\]]+)\]\[[^\]]*\]`)
+	mdTag      = regexp.MustCompile(`</?[A-Za-z!][^>]{0,500}>`)
+	mdLineHead = regexp.MustCompile(`(?m)^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)`)
+	mdRule     = regexp.MustCompile(`(?m)^\s{0,3}([-*_=]\s*){3,}$`)
+	mdEmphasis = regexp.MustCompile("(\\*\\*|\\*|`)")
+)
+
+// PlainText reduces Markdown release notes to one line of plain text for
+// an excerpt: markup, HTML tags and line structure are dropped.
+func PlainText(md string) string {
+	s := mdFence.ReplaceAllString(md, "")
+	s = mdImage.ReplaceAllString(s, "$1")
+	s = mdLink.ReplaceAllString(s, "$1")
+	s = mdRefLink.ReplaceAllString(s, "$1")
+	s = mdTag.ReplaceAllString(s, " ")
+	s = mdRule.ReplaceAllString(s, "")
+	s = mdLineHead.ReplaceAllString(s, "")
+	s = mdEmphasis.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // Build renders every format from the store and checks it. It writes nothing.
@@ -87,7 +129,11 @@ func Build(ctx context.Context, st *store.Store, c *config.Config, generator str
 	items := make([]feed.Item, len(rels))
 	var lastBuild time.Time
 	for i, r := range rels {
-		items[i] = Item(r)
+		notes, err := st.Notes(ctx, r.NotesHash)
+		if err != nil {
+			return nil, err
+		}
+		items[i] = Item(r, notes)
 		if u := r.ContentUpdated; u.After(lastBuild) {
 			lastBuild = u
 		}

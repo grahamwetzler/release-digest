@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"release-digest/internal/config"
 	"release-digest/internal/ident"
@@ -64,7 +66,12 @@ func TestGolden(t *testing.T) {
 		{"o/unicode", "版本-1", "", "tag"},
 	} {
 		pub := now.Add(-time.Duration(i) * day)
+		hash := ""
+		if i == 0 {
+			hash, _ = st.PutNotes(ctx, "## Highlights\n\n- **Faster** lockfile resolution for [workspaces](https://docs.astral.sh/uv/) & <b>more</b>\n- Fixed `uv sync` on Windows")
+		}
 		_, err := st.InsertRelease(ctx, &store.Release{
+			NotesHash: hash, NotesSource: "release_body",
 			Repo: r.repo, Tag: r.tag, GUID: ident.GUID(r.repo, r.tag), Kind: r.kind, Name: r.name,
 			HTMLURL: "https://github.com/" + r.repo + "/releases/tag/" + r.tag, Prerelease: i == 2,
 			Published: pub, FirstSeen: pub, ContentUpdated: pub.Add(time.Hour), State: store.StateFallback, Origin: "live",
@@ -133,5 +140,36 @@ func TestPublishKeepsModifiedWhenUnchanged(t *testing.T) {
 	}
 	if !changed[RSS.Path].Modified.Equal(now.Add(2*time.Hour)) || changed[RSS.Path].ETag == first[RSS.Path].ETag {
 		t.Error("Modified or ETag did not move with the bytes")
+	}
+}
+
+func TestPlainText(t *testing.T) {
+	for in, want := range map[string]string{
+		"## Features\n\n* Add **bold** and `code`\n* See [docs](https://x.example)": "Features Add bold and code See docs",
+		"Setext\n======\n\n> quoted\n\n1. first\n2) second":                         "Setext quoted first second",
+		"```go\nfmt.Println(1)\n```\n![logo](x.png) a < b > c &amp; d":              "fmt.Println(1) logo a < b > c & d",
+		"Keep __init__ and snake_case<br/>end":                                      "Keep __init__ and snake_case end",
+		"":                                                                          "",
+	} {
+		if got := PlainText(in); got != want {
+			t.Errorf("PlainText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFallbackItem(t *testing.T) {
+	r := &store.Release{Repo: "o/r", Tag: "v1", HTMLURL: "https://github.com/o/r/releases/tag/v1", State: store.StateFallback, Kind: "release"}
+	it := Item(r, strings.Repeat("word ", 200))
+	if n := utf8.RuneCountInString(it.Description); n > ExcerptChars+1 || !strings.HasSuffix(it.Description, "…") {
+		t.Errorf("description is %d runes: %q", n, it.Description)
+	}
+	for _, want := range []string{"<p>word word", `<a href="https://github.com/o/r/releases/tag/v1">Full release notes</a>`, "Summary pending."} {
+		if !strings.Contains(it.ContentHTML, want) {
+			t.Errorf("missing %q in %s", want, it.ContentHTML)
+		}
+	}
+	empty := Item(r, "")
+	if empty.Description != "Release notes for o/r v1." || !strings.Contains(empty.ContentHTML, ">Release notes</a>") {
+		t.Errorf("no notes: %+v", empty)
 	}
 }

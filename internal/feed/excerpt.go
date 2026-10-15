@@ -18,3 +18,7 @@ func excerpt(text string, n int) string {
 	}
 	return head + "…"
 }
+
+// Excerpt cuts text to at most n runes plus an ellipsis, at a word boundary
+// when one falls past halfway.
+func Excerpt(text string, n int) string { return excerpt(text, n) }

@@ -17,8 +17,8 @@
     <published>2026-10-15T12:00:00Z</published>
     <updated>2026-10-15T13:00:00Z</updated>
     <category term="astral-sh/uv"></category>
-    <summary type="text">Release notes for astral-sh/uv 0.9.4.</summary>
-    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/astral-sh/uv/releases/tag/0.9.4&#34;&gt;Release notes&lt;/a&gt; for astral-sh/uv 0.9.4.&lt;/p&gt;</content>
+    <summary type="text">Highlights Faster lockfile resolution for workspaces &amp; more Fixed uv sync on Windows</summary>
+    <content type="html">&lt;p&gt;Highlights Faster lockfile resolution for workspaces &amp;amp; more Fixed uv sync on Windows&lt;/p&gt;&#xA;&lt;p&gt;&lt;a href=&#34;https://github.com/astral-sh/uv/releases/tag/0.9.4&#34;&gt;Full release notes&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summary pending.&lt;/small&gt;&lt;/p&gt;</content>
   </entry>
   <entry>
     <id>urn:uuid:f5e760ae-d7bf-5704-b4e8-7ac51a0ca91d</id>
@@ -28,7 +28,7 @@
     <updated>2026-10-14T13:00:00Z</updated>
     <category term="aws/aws-sdk-go-v2"></category>
     <summary type="text">Tag for aws/aws-sdk-go-v2 service/s3/v1.2.3.</summary>
-    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3&#34;&gt;Tag&lt;/a&gt; for aws/aws-sdk-go-v2 service/s3/v1.2.3.&lt;/p&gt;</content>
+    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3&#34;&gt;Tag&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summary pending.&lt;/small&gt;&lt;/p&gt;</content>
   </entry>
   <entry>
     <id>urn:uuid:6bd39253-6b16-5373-9303-a64614c4a9a7</id>
@@ -39,7 +39,7 @@
     <category term="o/semver"></category>
     <category term="prerelease"></category>
     <summary type="text">Release notes for o/semver 1.0.0+build.5.</summary>
-    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/o/semver/releases/tag/1.0.0+build.5&#34;&gt;Release notes&lt;/a&gt; for o/semver 1.0.0+build.5.&lt;/p&gt;</content>
+    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/o/semver/releases/tag/1.0.0+build.5&#34;&gt;Release notes&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summary pending.&lt;/small&gt;&lt;/p&gt;</content>
   </entry>
   <entry>
     <id>urn:uuid:57d81944-317d-5742-a8f7-78f64aabf842</id>
@@ -49,6 +49,6 @@
     <updated>2026-10-12T13:00:00Z</updated>
     <category term="o/unicode"></category>
     <summary type="text">Tag for o/unicode 版本-1.</summary>
-    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/o/unicode/releases/tag/版本-1&#34;&gt;Tag&lt;/a&gt; for o/unicode 版本-1.&lt;/p&gt;</content>
+    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/o/unicode/releases/tag/版本-1&#34;&gt;Tag&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summary pending.&lt;/small&gt;&lt;/p&gt;</content>
   </entry>
 </feed>

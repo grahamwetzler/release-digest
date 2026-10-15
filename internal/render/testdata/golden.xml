@@ -14,8 +14,10 @@
     <item>
       <title>astral-sh/uv 0.9.4</title>
       <link>https://github.com/astral-sh/uv/releases/tag/0.9.4</link>
-      <description>Release notes for astral-sh/uv 0.9.4.</description>
-      <content:encoded><![CDATA[<p><a href="https://github.com/astral-sh/uv/releases/tag/0.9.4">Release notes</a> for astral-sh/uv 0.9.4.</p>]]></content:encoded>
+      <description>Highlights Faster lockfile resolution for workspaces &amp;amp; more Fixed uv sync on Windows</description>
+      <content:encoded><![CDATA[<p>Highlights Faster lockfile resolution for workspaces &amp; more Fixed uv sync on Windows</p>
+<p><a href="https://github.com/astral-sh/uv/releases/tag/0.9.4">Full release notes</a></p>
+<p><small>Summary pending.</small></p>]]></content:encoded>
       <category>astral-sh/uv</category>
       <pubDate>Thu, 15 Oct 2026 12:00:00 +0000</pubDate>
       <guid isPermaLink="false">13675a19-6025-50cc-beb9-5a423ff36c63</guid>
@@ -24,7 +26,8 @@
       <title>aws/aws-sdk-go-v2 service/s3/v1.2.3</title>
       <link>https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3</link>
       <description>Tag for aws/aws-sdk-go-v2 service/s3/v1.2.3.</description>
-      <content:encoded><![CDATA[<p><a href="https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3">Tag</a> for aws/aws-sdk-go-v2 service/s3/v1.2.3.</p>]]></content:encoded>
+      <content:encoded><![CDATA[<p><a href="https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3">Tag</a></p>
+<p><small>Summary pending.</small></p>]]></content:encoded>
       <category>aws/aws-sdk-go-v2</category>
       <pubDate>Wed, 14 Oct 2026 12:00:00 +0000</pubDate>
       <guid isPermaLink="false">f5e760ae-d7bf-5704-b4e8-7ac51a0ca91d</guid>
@@ -33,7 +36,8 @@
       <title>o/semver Build &lt;5&gt; &amp; more (pre-release)</title>
       <link>https://github.com/o/semver/releases/tag/1.0.0+build.5</link>
       <description>Release notes for o/semver 1.0.0+build.5.</description>
-      <content:encoded><![CDATA[<p><a href="https://github.com/o/semver/releases/tag/1.0.0+build.5">Release notes</a> for o/semver 1.0.0+build.5.</p>]]></content:encoded>
+      <content:encoded><![CDATA[<p><a href="https://github.com/o/semver/releases/tag/1.0.0+build.5">Release notes</a></p>
+<p><small>Summary pending.</small></p>]]></content:encoded>
       <category>o/semver</category>
       <category>prerelease</category>
       <pubDate>Tue, 13 Oct 2026 12:00:00 +0000</pubDate>
@@ -43,7 +47,8 @@
       <title>o/unicode 版本-1</title>
       <link>https://github.com/o/unicode/releases/tag/版本-1</link>
       <description>Tag for o/unicode 版本-1.</description>
-      <content:encoded><![CDATA[<p><a href="https://github.com/o/unicode/releases/tag/版本-1">Tag</a> for o/unicode 版本-1.</p>]]></content:encoded>
+      <content:encoded><![CDATA[<p><a href="https://github.com/o/unicode/releases/tag/版本-1">Tag</a></p>
+<p><small>Summary pending.</small></p>]]></content:encoded>
       <category>o/unicode</category>
       <pubDate>Mon, 12 Oct 2026 12:00:00 +0000</pubDate>
       <guid isPermaLink="false">57d81944-317d-5742-a8f7-78f64aabf842</guid>

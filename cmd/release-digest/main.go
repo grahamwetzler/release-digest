@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"sync/atomic"
 
 	"release-digest/internal/config"
+	"release-digest/internal/github"
+	"release-digest/internal/poll"
 	"release-digest/internal/secret"
 	"release-digest/internal/store"
 )
@@ -122,6 +126,12 @@ type env struct {
 	secrets secrets
 	store   *store.Store
 	log     *slog.Logger
+	gh      *github.Client
+	poller  *poll.Poller
+
+	// guardOK is set once the active GitHub token has passed the token guard
+	// (§3.1). Until then no tick polls GitHub.
+	guardOK atomic.Bool
 }
 
 // open loads the config and secrets and opens the store. On failure it
@@ -145,7 +155,55 @@ func open(ctx context.Context, cfgPath string, stderr io.Writer) (*env, int) {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return nil, 1
 	}
+	e.gh = &github.Client{
+		BaseURL:   cfg.GitHub.APIURL,
+		Token:     func() secret.String { return e.secrets.GitHub.Get().Value },
+		HTTP:      &http.Client{},
+		Cache:     e.store,
+		Timeout:   cfg.GitHub.RequestTimeout.D,
+		UserAgent: generator(),
+	}
+	e.poller = &poll.Poller{GH: e.gh, Store: e.store, Cfg: cfg, Log: log}
 	return e, 0
+}
+
+// startGuard runs the token guard at startup (§3.1). A token that fails it
+// is fatal. If the check can't run (GitHub unreachable), the service starts
+// anyway, and each tick retries the guard before polling.
+func (e *env) startGuard(ctx context.Context) error {
+	err := e.checkGuard(ctx)
+	var ge *github.GuardError
+	if errors.As(err, &ge) {
+		return err
+	}
+	return nil
+}
+
+// checkGuard runs the token guard on the active token unless it already
+// passed, recording a pass.
+func (e *env) checkGuard(ctx context.Context) error {
+	if e.guardOK.Load() {
+		return nil
+	}
+	tok := e.secrets.GitHub.Get()
+	err := e.gh.Guard(ctx, tok.Value)
+	switch {
+	case err == nil:
+		e.guardOK.Store(true)
+		if tok.Present() {
+			e.log.Info("github token checked for obvious private-repo access only (best effort): passed")
+		}
+	case isGuardError(err):
+		e.log.Error("github token failed the token guard; GitHub is not polled", "err", err)
+	default:
+		e.log.Warn("github token guard could not run; GitHub is not polled until it does", "err", err)
+	}
+	return err
+}
+
+func isGuardError(err error) bool {
+	var ge *github.GuardError
+	return errors.As(err, &ge)
 }
 
 // logSecrets reports where each secret came from, never its value.

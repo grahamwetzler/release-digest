@@ -83,6 +83,7 @@ type RepoOptions struct {
 	MaxPages           *int      `yaml:"max_pages"`
 	Changelog          *string   `yaml:"changelog"` // auto | off | a repo-relative path
 	TagPattern         *Regex    `yaml:"tag_pattern"`
+	ExcludePattern     *Regex    `yaml:"exclude_pattern"`
 	PrereleasePattern  *Regex    `yaml:"prerelease_pattern"`
 	Packages           []Package `yaml:"packages"`
 }

@@ -72,17 +72,22 @@ For each repo:
    - On `private: true`, the repo is marked refused in `repo_state` and an error is logged. Its queued `pending` releases move to `skipped` so they never reach the LLM. `config lint` fails on it.
    - A repo that turns private keeps its already-published items, since they were public when fetched.
 
-**Token guard (startup, hard).** Public-only is enforced on the credential too, not just recommended:
+**Where public-only is actually enforced.** The guarantee rests on the per-poll visibility check above, **not** on the token. GitHub reports `private: true` for a private repo whatever the token's permissions, so a private repo is refused before any of its content is requested.
 
-- For a classic token, if the `X-OAuth-Scopes` response header includes `repo`, startup fails.
-- For any token, `GET /user/repos?visibility=private&per_page=1` must return an empty list, otherwise startup fails. The message says to use a fine-grained token with **"Public repositories (read-only)"** access.
+The only residual exposure is a repo flipping to private in the seconds between its visibility check and its content requests within one poll. Content fetched in that window was public moments earlier. This is accepted and documented in the README.
 
-So a misconfigured token can't fetch private content even during the window between a repo going private and the next visibility check.
+**Token guard (best-effort, defense in depth).** GitHub provides no API that proves a token is public-only. For example, a fine-grained token scoped to "selected repositories" that happen to be public today looks identical to a public-only token. So the guard catches obvious misconfiguration and claims nothing more:
+
+- For a classic token, if the `X-OAuth-Scopes` header includes `repo`, startup fails.
+- For any token, `GET /user/repos?visibility=private&per_page=1` returning anything fails startup.
+- The startup log states that the token was checked for *obvious* private access only. The README recommends a fine-grained token with **"Public repositories (read-only)"** access.
+- **SIGHUP re-runs the guard** on a replacement token *before* it's activated. If the new token fails, the old one stays in use and an error is logged.
 1. `GET /repos/{owner}/{repo}/releases?per_page=30` (page 1) with `If-None-Match`. When authenticated, a 304 doesn't count against the rate limit.
 2. If the repo has **no releases** (or `sources: [tags]` is set), call `GET /repos/{owner}/{repo}/tags?per_page=30` and resolve each new tag's commit date with `GET /repos/{owner}/{repo}/commits/{sha}`, whose result is cached forever.
-3. **Catch-up pagination.** Each repo persists a **scan boundary**: the newest tag of its last *completed* scan, stored in `repo_state.scan_boundary`. If page 1 doesn't contain the boundary, which happens after downtime or a burst of releases, further pages are fetched until it appears or `max_pages` (default 5) is reached.
-   - Rows are inserted as pages arrive, but the boundary only advances to page 1's newest tag once the scan **completes**: the boundary is found, the cap is reached, or the list ends.
-   - An interrupted scan (timeout, rate limit, budget, restart) leaves the boundary where it was, so the next tick re-walks the same pages. ETags make the repeat cheap, and rows already inserted are idempotent.
+3. **Catch-up pagination.** Each repo persists a **scan boundary**: the newest tag of its last *completed* scan, stored in `repo_state.scan_boundary`. If page 1 doesn't contain the boundary, which happens after downtime or a burst of releases, a catch-up scan starts. Further pages are fetched until the boundary appears or `max_pages` (default 5) is reached.
+   - **Progress is persisted** as the scan runs: `scan_head`, the newest tag when the scan started, and `scan_next_page`. Rows are inserted as pages arrive.
+   - An interrupted scan (timeout, rate limit, budget, restart) **resumes at `scan_next_page − 1`** on the next tick. The one-page overlap absorbs list shifts: new releases push entries down, which only causes duplicates, and those are idempotent by tag. A deletion can pull one entry up, and the overlap catches it. So a scan that needs several ticks' budgets still moves forward every tick.
+   - When the scan **completes** (the boundary is found, the cap is reached, or the list ends), `scan_boundary` becomes `scan_head` and the progress fields are cleared. Releases newer than `scan_head` that arrived during a multi-tick scan show up on page 1 at the next poll.
    - Versions past the cap are **intentionally omitted**: never fetched, never recorded. A warning names the repo and the number of pages scanned.
 4. Classify each version (§3.1.1). Then filter by `include_prereleases`, by drafts (always excluded) and by the optional `tag_pattern` / `exclude_pattern` regexes, such as skipping `nightly-*`. Filtered versions are recorded as `skipped`, which keeps them available for predecessor selection (§3.2.1).
 5. Insert each unseen, unfiltered version as a `release` row in state `pending`.
@@ -92,9 +97,15 @@ So a misconfigured token can't fetch private content even during the window betw
 **Deletion detection.** Disappearing from a list response is never enough to mark a release deleted: lists are paginated and windowed. Deletion is decided only by a **direct existence check**: `GET /repos/{o}/{r}/releases/tags/{tag}` for releases, or `GET /repos/{o}/{r}/git/ref/tags/{tag}` for tags, sent conditionally and recorded in `last_verified_at`. Two things trigger a check:
 
 1. **Window candidates (immediate).** A stored release newer than the oldest entry on page 1 but absent from page 1 should have been there, so it's checked in the same poll. If page 1 is empty, every stored published release of that repo is a candidate.
-2. **Rotating sweep (bounded).** Each tick, up to `github.verify_per_tick` (default 10) published releases across all repos are checked, oldest `last_verified_at` first. This eventually catches deletions of releases that have aged out of the page-1 window. With 200 items and an hourly tick, every item is re-verified within a day.
+2. **Rotating sweep (bounded).** Each tick, up to `github.verify_per_tick` (default 10) published releases across all repos are checked. They're ordered by `verify_attempted_at`, the time of the last *attempt* whatever its outcome, oldest first. This eventually catches deletions of releases that have aged out of the page-1 window. With 200 items and an hourly tick, every item gets an attempt within a day.
 
-Only a 404 sets `missing_since`. Any other outcome leaves the record untouched: an error, a rate limit, a timeout, or a check cut short by the budget. A later successful check or list appearance clears `missing_since`.
+**Outcomes:**
+
+- **404:** sets `missing_since`.
+- **Success:** sets `last_verified_at` and clears `missing_since`.
+- **Anything else** (error, rate limit, timeout): only `verify_attempted_at` is updated. The release itself is left untouched. Because the sweep orders by attempt time, persistently failing items rotate to the back instead of hogging the sweep, and healthy repos keep getting checked.
+
+A list appearance also clears `missing_since`.
 
 **Rate limits:** `GITHUB_TOKEN` is optional but strongly recommended (60 vs 5,000 req/h). The client reads `X-RateLimit-Remaining`, `X-RateLimit-Reset` and `Retry-After`. If the reset is under 2 minutes away, it waits. Otherwise it ends the poll stage early, and the round-robin cursor (§3) resumes there next tick. Recommended token: a fine-grained token with **"Public repositories (read-only)"** access and no other permissions. It can't read private repos even by mistake.
 
@@ -170,7 +181,7 @@ The resolved text, its source (`release_body` / `changelog` / `compare`) and its
 |---|---|---|---|
 | `skipped` | no | no | terminal: backfill, filter or catch-up overflow |
 | `pending` | no | yes, when `next_attempt_at ≤ now` | → `summarized` on success; → `fallback` at render time once `now − first_seen_at ≥ llm.publish_after` (default 6h); → `no_notes` when notes resolve to none |
-| `fallback` | yes, excerpt | yes, when `next_attempt_at ≤ now` (no age cutoff) | → `summarized` on success; content updates, identity doesn't |
+| `fallback` | yes, excerpt | yes, when `next_attempt_at ≤ now` (no age cutoff) | → `summarized` on success; content updates, identity doesn't. → `no_notes` when resolution (§3.2) completes and finds no usable notes. This happens when render promoted the item before resolution had finished. A *transient* resolution failure (an error, a rate limit) is not "no notes": the item stays `fallback` and retries |
 | `summarized` | yes | no | → re-summarized only by `resummarize` |
 | `no_notes` | yes, deterministic | no | → `fallback` when a later poll finds notes (the release body was edited or a changelog section appeared). It stays in the feed and becomes eligible immediately |
 
@@ -276,7 +287,7 @@ Rules:
 - **No source** is fine for both secrets. GitHub then runs unauthenticated at 60 req/h with a startup warning, and the LLM sends no `Authorization` header, which suits local Ollama. `config lint` warns when `base_url` isn't a loopback or private address and there's no key.
 - **`*_FILE` is the standard Docker convention**, the same one the official Postgres and MySQL images use. The default path means a compose `secrets:` entry works without any env wiring at all.
 - **File handling** is the same for explicit and default paths. The file is read once at startup, and surrounding whitespace and the trailing newline (which `echo > file` leaves) are trimmed. A file that's empty after trimming, unreadable, or (for `*_FILE`) missing is a fatal error naming the path. Plain env set to an empty string is also fatal. The value is never echoed.
-- **Rotation:** `SIGHUP`, or restarting the container, re-reads secret files. No polling.
+- **Rotation:** `SIGHUP`, or restarting the container, re-reads secret files. No polling. A replacement GitHub token must pass the token guard (§3.1) before it replaces the active one.
 - **Never leaked:** secret values are held in a `secret.String` type whose `String()`, `GoString()`, `MarshalJSON()` and `LogValue()` (for slog) all return `[redacted]`. HTTP clients set `Authorization` from it at request time. Error messages from the LLM and GitHub clients strip the request headers before wrapping. `config lint` and the startup log report only the **source** of each secret, for example `llm api key: file /run/secrets/llm_api_key (51 bytes)`.
 - **Not in YAML:** the config loader rejects `api_key` / `token` keys in the YAML with a message pointing to §4.3, so a key can't end up committed to `deploy/`.
 - **Permissions:** compose file-based secrets are bind mounts that keep the host file's owner and mode. The container runs as distroless `nonroot` (uid 65532), so the host file must be readable by that uid. Either `chown 65532 secrets/*` with mode `0400`, or mode `0444` inside a `0700` directory owned by you. `config lint` reports an unreadable secret file with that hint. Swarm secrets can set `uid: "65532"` and `mode: 0400` directly.
@@ -426,7 +437,8 @@ CREATE TABLE releases (
   next_attempt_at INTEGER,
   last_error     TEXT NOT NULL DEFAULT '',
   content_updated_at INTEGER,              -- Atom <updated> (§5)
-  last_verified_at   INTEGER,              -- deletion sweep (§3.1)
+  last_verified_at   INTEGER,              -- last successful existence check (§3.1)
+  verify_attempted_at INTEGER,             -- last attempt, any outcome; sweep order
   missing_since  INTEGER,
   PRIMARY KEY (repo, tag)
 );
@@ -448,6 +460,7 @@ CREATE TABLE http_cache (url TEXT PRIMARY KEY, etag TEXT, body BLOB, fetched_at 
 CREATE TABLE repo_state (repo TEXT PRIMARY KEY, initialized_at INTEGER, last_success_at INTEGER,
                          refused_private INTEGER NOT NULL DEFAULT 0, visibility_checked_at INTEGER,
                          scan_boundary TEXT,          -- newest tag of last completed scan (§3.1)
+                         scan_head TEXT, scan_next_page INTEGER,  -- in-progress catch-up
                          last_error TEXT DEFAULT '');
 CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- e.g. poll round-robin cursor
 CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at INTEGER);
@@ -461,9 +474,10 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
   - pagination and catch-up past page 1
   - 304s and rate-limit headers, including an early stop and cursor resume
   - repos with no releases and repos with draft releases
-  - a catch-up interrupted on page 3, then resumed after a restart, ending with the boundary advanced exactly once
-  - private repos being refused, a visibility check that errors (fail-closed: no content requests), and the token guard rejecting a `repo`-scoped token
-  - deletion detection: a release that ages off page 1 is **not** a window candidate but is caught by the rotating sweep, an empty page 1, a candidate with a 404 is marked, and a candidate whose check errors or hits a rate limit is left alone
+  - a catch-up interrupted on page 3, then resumed after a restart from page 2 with new releases arriving at the top mid-scan, ending with the boundary advanced exactly once
+  - a catch-up that needs 3 ticks' budgets, making progress every tick
+  - private repos being refused, a visibility check that errors (fail-closed: no content requests), the token guard rejecting a `repo`-scoped token, and SIGHUP with a bad replacement token keeping the old one
+  - deletion detection: a release that ages off page 1 is **not** a window candidate but is caught by the rotating sweep, an empty page 1, a candidate with a 404 is marked, a candidate whose check errors or hits a rate limit is left alone, and 10 always-failing items don't starve the rest of the sweep
 - **version:** table tests of classification and predecessor selection:
   - `v2.0.0-rc.1`, `go1.28rc1`, `1.0.0beta2`, `service/api/v1.4.0`, `latest`
   - a maintenance-branch `1.2.4` after `2.0.0`
@@ -473,7 +487,7 @@ CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at
 - **llm:** a fake OpenAI-compatible server that exercises the `json_schema` → `json_object` → prompt-only fallback, malformed JSON with a repair retry, 429 backoff and timeouts.
 - **summarize:** the cache key differs when only the repo, version, `prev_tag` or `prompt_file` *contents* differ, and matches for byte-identical requests. Also the state machine: `pending` → `fallback` at render time even while the LLM is down, `fallback` → `summarized` after the LLM recovers across a restart, keeping the GUID and pubDate. `next_attempt_at` backoff is persisted.
 - **scheduler:** with a fake GitHub that hangs and a fake LLM that fails, the tick still renders, expired fallbacks are published, and the next tick resumes polling at the cursor. With a fake GitHub that always uses all of `poll_budget`, summaries still complete every tick.
-- **identity:** a `fallback` → `summarized` upgrade and a `no_notes` → `fallback` transition keep the GUID, the pubDate and feed membership, and advance Atom `<updated>`.
+- **identity:** a `fallback` → `summarized` upgrade, a `fallback` → `no_notes` transition and a `no_notes` → `fallback` transition keep the GUID, the pubDate and feed membership, and advance Atom `<updated>`.
 - **secret:** a table test of the lookup order, both `X` and `X_FILE` set is an error, trailing-newline trimming, missing or empty files, and redaction under `fmt` `%v`/`%+v`/`%#v`, `slog` and `json.Marshal`. A test also asserts that an LLM 401 error message doesn't contain the key.
 - **feed:** golden RSS/Atom files, local spec checks, and `make validate` against W3C (not in every CI run).
 - **End-to-end:** `build` against a fixture GitHub and a fake LLM produces the golden feed byte for byte.
@@ -502,7 +516,8 @@ Milestone 2 alone is already a useful aggregated releases feed, which makes it a
 - A structured TL;DR (headline / breaking / features / fixes / security) with a link to the full notes.
 - Project name `release-digest`, a Go module, living in `~/dev/release-digest`.
 - Secrets are supported through Docker secrets: `*_FILE` env vars and `/run/secrets/<name>` defaults, with plain env for dev. Exactly one source may be present, otherwise it's a startup error. Secrets in YAML are rejected. OpenRouter is the documented default LLM endpoint.
-- **Public repositories only** in v1. Private repos are refused through a fail-closed visibility check on every poll, plus a startup guard that rejects tokens able to read private repos (§3.1).
+- **Public repositories only** in v1. Enforcement is a fail-closed visibility check on every poll. The token guard is best-effort defense in depth, since GitHub can't prove a token is public-only (§3.1).
+- After the third roborev review: the token-guard claims are scoped honestly and re-checked on SIGHUP, catch-up resumes mid-scan with a one-page overlap, `fallback` → `no_notes` is allowed, and the deletion sweep orders by attempt time.
 - After the second roborev review: published items are never hidden by state transitions, fallbacks have no age cutoff, catch-up is resumable through a persisted scan boundary, deletion checks rotate across all published items, poll and summarize have separate budgets, and `content_updated_at` drives Atom `<updated>`.
 - After the first roborev review: the summary cache is keyed on the full canonical request, there's an explicit release state machine with fallback retries, deletions need a confirmed 404, tag pre-releases and predecessors are classified within a stream, scheduler passes are bounded and fair, and GUIDs are UUIDv5.
 

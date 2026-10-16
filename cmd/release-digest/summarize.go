@@ -73,10 +73,13 @@ func cmdSummarize(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return 1
 	}
-	in, row, err := dryRunNotes(ctx, gh, cfg, repo, tag)
+	in, row, warn, err := dryRunNotes(ctx, gh, cfg, repo, tag)
 	if err != nil {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return 1
+	}
+	if warn != "" {
+		fmt.Fprintf(stderr, "warning: %s\n", warn)
 	}
 	fmt.Fprintf(stdout, "%s@%s (previous: %s)\n", repo, tag, orNone(row.PrevTag))
 	if in.Source == "" {
@@ -113,7 +116,10 @@ func cmdSummarize(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "release-digest: %s is no longer confirmed public; nothing was sent to the LLM (%v)\n", repo, err)
 		return 1
 	}
-	res, err := s.Summarize(ctx, prompt, in)
+	res, err := s.Summarize(ctx, prompt, in, func(ctx context.Context) (bool, error) {
+		vis, err := gh.CheckPublic(ctx, repo, 0)
+		return vis.Public, err
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return 1
@@ -129,14 +135,15 @@ func cmdSummarize(args []string, stdout, stderr io.Writer) int {
 // dryRunNotes finds the release on GitHub and resolves its notes as the
 // poll stage would (§3.2), returning the summarize input and a release row
 // for rendering. The repo must pass the public check (§3.1).
-func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, repo, tag string) (summarize.Input, *store.Release, error) {
-	var in summarize.Input
+//
+// warn, if set, says the predecessor could not be determined.
+func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, repo, tag string) (in summarize.Input, row *store.Release, warn string, err error) {
 	vis, err := gh.CheckPublic(ctx, repo, 0)
 	if err != nil {
-		return in, nil, fmt.Errorf("checking %s is public: %w", repo, err)
+		return in, nil, "", fmt.Errorf("checking %s is public: %w", repo, err)
 	}
 	if !vis.Public {
-		return in, nil, fmt.Errorf("%s is private or not found; only public repos are summarized", repo)
+		return in, nil, "", fmt.Errorf("%s is private or not found; only public repos are summarized", repo)
 	}
 	opts := cfg.Defaults
 	for _, r := range cfg.Repos {
@@ -153,10 +160,10 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 	// Every tag is a candidate predecessor: the tag list is complete, where
 	// the releases list is paginated. Dates come from the newest releases,
 	// for date-ordered tags.
-	row := &store.Release{Repo: repo, Tag: tag, Kind: "release"}
+	row = &store.Release{Repo: repo, Tag: tag, Kind: "release"}
 	refs, err := gh.TagRefs(ctx, repo)
 	if err != nil {
-		return in, nil, err
+		return in, nil, "", err
 	}
 	var cands []semver.Candidate
 	found := false
@@ -169,17 +176,17 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 	switch {
 	case errors.Is(err, github.ErrNotFound):
 		if !found {
-			return in, nil, fmt.Errorf("%s has no release or tag %q", repo, tag)
+			return in, nil, "", fmt.Errorf("%s has no release or tag %q", repo, tag)
 		}
 		row.Kind = "tag"
 		row.HTMLURL = poll.TagURL(cfg.GitHub.APIURL, repo, tag)
 	case err != nil:
-		return in, nil, err
+		return in, nil, "", err
 	default:
 		row.Name, row.HTMLURL, row.Prerelease = rel.Name, rel.HTMLURL, rel.Prerelease
 		list, err := gh.Releases(ctx, repo, 1)
 		if err != nil {
-			return in, nil, err
+			return in, nil, "", err
 		}
 		for _, r := range list {
 			if r.Draft {
@@ -201,8 +208,14 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 		this.Published = *rel.PublishedAt
 	}
 	if this.Version == "" {
-		if err := datePredecessors(ctx, gh, repo, refs, &this, cands); err != nil {
-			return in, nil, err
+		complete, err := datePredecessors(ctx, gh, repo, refs, &this, cands)
+		if err != nil {
+			return in, nil, "", err
+		}
+		if !complete {
+			// A guess from some of the dates could be the wrong tag.
+			this.Published = time.Time{}
+			warn = fmt.Sprintf("%s has more than %d date-ordered tags in its stream; the previous version was not determined", tag, MaxDateLookups)
 		}
 	}
 	row.PrevTag = semver.Predecessor(this, cands)
@@ -215,10 +228,10 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 	out, err := res.Resolve(ctx, notes.Request{Repo: repo, Tag: tag, Stream: row.Stream, Version: row.Version,
 		PrevTag: row.PrevTag, Body: body, Changelog: *opts.Changelog})
 	if err != nil {
-		return in, nil, fmt.Errorf("resolving notes: %w", err)
+		return in, nil, "", fmt.Errorf("resolving notes: %w", err)
 	}
 	row.NotesSource = out.Source
-	return summarize.Input{Repo: repo, Tag: tag, PrevTag: row.PrevTag, Source: out.Source, Notes: out.Text}, row, nil
+	return summarize.Input{Repo: repo, Tag: tag, PrevTag: row.PrevTag, Source: out.Source, Notes: out.Text}, row, warn, nil
 }
 
 // MaxDateLookups bounds the tag date lookups for a date-ordered tag's
@@ -228,8 +241,9 @@ const MaxDateLookups = 30
 // datePredecessors fills in the dates a date-ordered tag's predecessor
 // needs (§3.2.1): its own, unless its release gave one, and those of the
 // other date-ordered tags in its stream that the releases list didn't
-// date, up to MaxDateLookups of them.
-func datePredecessors(ctx context.Context, gh *github.Client, repo string, refs []github.TagRef, this *semver.Candidate, cands []semver.Candidate) error {
+// date. It dates at most MaxDateLookups of them and reports false if more
+// were needed: then the predecessor can't be determined.
+func datePredecessors(ctx context.Context, gh *github.Client, repo string, refs []github.TagRef, this *semver.Candidate, cands []semver.Candidate) (bool, error) {
 	byName := map[string]github.TagRef{}
 	for _, r := range refs {
 		byName[r.Name] = r
@@ -257,7 +271,7 @@ func datePredecessors(ctx context.Context, gh *github.Client, repo string, refs 
 	var err error
 	if this.Published.IsZero() {
 		if this.Published, err = lookup(this.Tag); err != nil {
-			return fmt.Errorf("dating %s: %w", this.Tag, err)
+			return false, fmt.Errorf("dating %s: %w", this.Tag, err)
 		}
 	}
 	looked := 0
@@ -268,15 +282,15 @@ func datePredecessors(ctx context.Context, gh *github.Client, repo string, refs 
 		}
 		if _, ok := dated[c.Tag]; !ok {
 			if looked == MaxDateLookups {
-				continue
+				return false, nil
 			}
 			looked++
 		}
 		if c.Published, err = lookup(c.Tag); err != nil {
-			return fmt.Errorf("dating %s: %w", c.Tag, err)
+			return false, fmt.Errorf("dating %s: %w", c.Tag, err)
 		}
 	}
-	return nil
+	return true, nil
 }
 
 func orNone(s string) string {

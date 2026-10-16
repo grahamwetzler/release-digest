@@ -54,9 +54,16 @@ type Result struct {
 	TokensOut int
 }
 
+// ErrNotPublic means the repo failed a public check between LLM requests,
+// so the notes were not sent again. It is not the release's failure.
+var ErrNotPublic = errors.New("the repo is no longer confirmed public")
+
 // Summarize asks the LLM to summarize in, allowing one repair retry for an
-// invalid reply. It touches neither the store nor the gate: callers do.
-func (s *Summarizer) Summarize(ctx context.Context, prompt string, in Input) (*Result, error) {
+// invalid reply. It touches neither the store nor the gate: callers check
+// visibility before calling it, and recheck, if set, runs before the repair
+// request, since the first call can take minutes (§3.1). A failed recheck
+// returns ErrNotPublic.
+func (s *Summarizer) Summarize(ctx context.Context, prompt string, in Input, recheck func(context.Context) (bool, error)) (*Result, error) {
 	msgs := Messages(prompt, in)
 	res := &Result{Key: Key(s.endpoint(), msgs), Messages: msgs}
 	req := llm.Request{Messages: msgs, Name: "release_summary", Schema: Schema}
@@ -67,6 +74,13 @@ func (s *Summarizer) Summarize(ctx context.Context, prompt string, in Input) (*R
 	res.TokensIn, res.TokensOut = resp.TokensIn, resp.TokensOut
 	sum, perr := Parse(resp.Content)
 	if perr != nil {
+		if recheck != nil {
+			if public, err := recheck(ctx); err != nil {
+				return nil, err
+			} else if !public {
+				return nil, ErrNotPublic
+			}
+		}
 		req.Messages = append(append([]llm.Message(nil), msgs...),
 			llm.Message{Role: "assistant", Content: resp.Content},
 			llm.Message{Role: "user", Content: fmt.Sprintf("That reply was invalid: %v. Reply again with only the corrected JSON object.", perr)})
@@ -182,10 +196,18 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 	}
 	reused := cached != nil
 	if !reused {
-		res, err := s.Summarize(ctx, prompt, in)
+		var gateErr error
+		res, err := s.Summarize(ctx, prompt, in, func(ctx context.Context) (bool, error) {
+			public, err := s.Gate(ctx, r.Repo)
+			gateErr = err
+			return public, err
+		})
 		if err != nil {
-			if ctx.Err() != nil {
-				return false, nil // shutting down: not the release's failure
+			if gateErr != nil {
+				return false, gateErr // a store failure
+			}
+			if ctx.Err() != nil || errors.Is(err, ErrNotPublic) {
+				return false, nil // shutting down, or gated: not the release's failure
 			}
 			s.Log.Warn("summary failed; the release keeps its excerpt and is retried later",
 				"repo", r.Repo, "tag", r.Tag, "attempts", r.Attempts+1, "err", err)
@@ -203,7 +225,9 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 			return false, err
 		}
 	}
-	ok, err := s.Store.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, s.now())
+	// Conditional on the repo's confirmation for this tick, atomically: a
+	// concurrent worker's failed check for the same repo stops it (§3.1).
+	ok, err := s.Store.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, tick, s.now())
 	if err == nil && ok {
 		s.Log.Info("summarized", "repo", r.Repo, "tag", r.Tag, "reused", reused, "tokens_in", cached.TokensIn, "tokens_out", cached.TokensOut)
 	}

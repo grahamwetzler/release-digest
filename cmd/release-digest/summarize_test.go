@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,5 +88,27 @@ func TestSummarizeDryRunDatesADateOrderedTag(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestSummarizeDryRunReportsAnUndeterminedPredecessor(t *testing.T) {
+	cleanEnv(t)
+	gh := githubtest.New()
+	defer gh.Close()
+	now := time.Now()
+	repo := gh.Repo("o/nightly")
+	for i := range MaxDateLookups + 2 {
+		repo.Tags = append(repo.Tags, githubtest.Tag{Name: fmt.Sprintf("nightly-%c%c", 'a'+i/26, 'a'+i%26), SHA: fmt.Sprintf("c%d", i),
+			Date: now.Add(-time.Duration(i) * time.Hour)})
+	}
+	ai := llmtest.New(`{"headline":"x","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":true}`)
+	defer ai.Close()
+	cfg := writeConfig(t, "github: {api_url: "+gh.URL+"}\nllm: {base_url: "+ai.URL()+", model: m}\n")
+	var out, errb bytes.Buffer
+	if code := run([]string{"summarize", "--config", cfg, "o/nightly@nightly-aa"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d\n%s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "(previous: none)") || !strings.Contains(errb.String(), "was not determined") {
+		t.Errorf("stdout:\n%s\nstderr:\n%s", out.String(), errb.String())
 	}
 }

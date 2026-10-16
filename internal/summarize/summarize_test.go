@@ -424,3 +424,42 @@ func TestRepoGoingPrivateDuringTheCallIsNotPublished(t *testing.T) {
 		t.Errorf("%d LLM requests, want the one", n)
 	}
 }
+
+func TestRepairRequestIsGated(t *testing.T) {
+	h := newHarness(t)
+	h.add("o/r", "v1", store.StatePending, t0)
+	h.fake.Queue(llmtest.Reply{Content: `{"headline":""}`})
+	h.fake.SetDefault(func(llmtest.Request) llmtest.Reply { return llmtest.Reply{Content: good} })
+	// The repo turns private while the first, invalid, reply is produced.
+	first := true
+	h.s.Gate = func(ctx context.Context, repo string) (bool, error) {
+		ok := first
+		first = false
+		return ok, nil
+	}
+	h.pass()
+	if n := len(h.fake.Requests()); n != 1 {
+		t.Errorf("%d LLM requests; the repair request must not be sent", n)
+	}
+	if r := h.get("o/r", "v1"); r.State != store.StatePending || r.Attempts != 0 {
+		t.Errorf("state %s, attempts %d", r.State, r.Attempts)
+	}
+}
+
+func TestSummarizedNeedsTheTickConfirmation(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	r := h.add("o/r", "v1", store.StatePending, t0)
+	// Another worker's failed check invalidates the confirmation.
+	h.st.Visibility(ctx, "o/r", h.tick, false, false, t0, "boom")
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", h.tick, t0); err != nil || ok {
+		t.Errorf("Summarized = %v, %v after the confirmation was lost", ok, err)
+	}
+	h.confirm("o/r")
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", h.tick-1, t0); err != nil || ok {
+		t.Errorf("Summarized = %v, %v for a stale tick", ok, err)
+	}
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", h.tick, t0); err != nil || !ok {
+		t.Errorf("Summarized = %v, %v while confirmed", ok, err)
+	}
+}

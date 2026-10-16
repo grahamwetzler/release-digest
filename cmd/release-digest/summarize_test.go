@@ -62,3 +62,30 @@ func TestSummarizeDryRun(t *testing.T) {
 		}
 	}
 }
+
+func TestSummarizeDryRunDatesADateOrderedTag(t *testing.T) {
+	cleanEnv(t)
+	gh := githubtest.New()
+	defer gh.Close()
+	now := time.Now()
+	repo := gh.Repo("o/nightly")
+	repo.Tags = []githubtest.Tag{
+		{Name: "nightly-b", SHA: "c2", Date: now.Add(-time.Hour)},
+		{Name: "nightly-a", SHA: "c1", Date: now.Add(-48 * time.Hour)},
+	}
+	repo.Compares = map[string]githubtest.Comparison{"nightly-a...nightly-b": {Status: "ahead",
+		Commits: []githubtest.Commit{{Message: "Add the streaming parser", Login: "dev", Type: "User", Parents: 1}}}}
+	ai := llmtest.New(`{"headline":"Streaming parser","breaking":[],"features":["Streaming parser"],"fixes":[],"security":[],"noise_only":false}`)
+	defer ai.Close()
+	cfg := writeConfig(t, "github: {api_url: "+gh.URL+"}\nllm: {base_url: "+ai.URL()+", model: m}\n")
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"summarize", "--config", cfg, "o/nightly@nightly-b"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d\n%s", code, errb.String())
+	}
+	for _, want := range []string{"(previous: nightly-a)", "notes: compare", "Diff since nightly-a"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+}

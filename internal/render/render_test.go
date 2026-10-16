@@ -243,10 +243,18 @@ func TestSummarizedItem(t *testing.T) {
 		t.Errorf("categories = %v", it.Categories)
 	}
 
-	noise := &summarize.Summary{Headline: "Dependency updates", Fixes: []string{"ignored"}, NoiseOnly: true}
+	noise := &summarize.Summary{Headline: "Dependency updates", NoiseOnly: true}
 	it = Item(r, "", &store.Summary{Model: "m", JSON: noise.Encode()})
-	if !strings.Contains(it.ContentHTML, "<p>No user-facing changes.</p>") || strings.Contains(it.ContentHTML, "ignored") {
+	if !strings.Contains(it.ContentHTML, "<p>No user-facing changes.</p>") || strings.Contains(it.ContentHTML, "<h4>") {
 		t.Errorf("noise-only content = %s", it.ContentHTML)
+	}
+
+	// A noise_only summary with a security fix is not noise: the item never
+	// says "no user-facing changes" while marked security.
+	contra := `{"headline":"Bumps deps","security":["Fixes CVE-2026-1"],"noise_only":true}`
+	it = Item(r, "", &store.Summary{Model: "m", JSON: contra})
+	if strings.Contains(it.ContentHTML, "No user-facing") || !strings.Contains(it.ContentHTML, "<h4>Security</h4>") {
+		t.Errorf("contradictory summary: %s", it.ContentHTML)
 	}
 
 	// An unreadable summary falls back to the excerpt.

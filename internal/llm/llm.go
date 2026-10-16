@@ -52,6 +52,9 @@ const (
 // Retries is how many times one call retries a 429 or 5xx.
 const Retries = 3
 
+// MaxRetryAfter is the longest Retry-After a call waits out itself.
+const MaxRetryAfter = time.Minute
+
 // maxBody bounds a response read.
 const maxBody = 4 << 20
 
@@ -120,14 +123,14 @@ func (c *Client) complete(ctx context.Context, req Request, f int) (*Response, e
 	}
 	for try := 0; ; try++ {
 		resp, wait, err := c.post(ctx, body)
-		if err == nil || try >= Retries || wait < 0 || ctx.Err() != nil {
+		if err == nil || try >= Retries || wait < 0 || wait > MaxRetryAfter || ctx.Err() != nil {
+			// A server that asks for a longer wait than MaxRetryAfter fails
+			// the attempt, and the summarize backoff (§3.3) takes over.
 			return resp, err
 		}
 		backoff := time.Second << try
 		backoff += rand.N(backoff) // jitter
-		if wait > backoff {
-			backoff = min(wait, time.Minute)
-		}
+		backoff = max(backoff, wait)
 		if !c.sleep(ctx, backoff) {
 			return nil, err
 		}
@@ -195,17 +198,17 @@ func (c *Client) post(ctx context.Context, body []byte) (*Response, time.Duratio
 	resp, err := hc.Do(hr)
 	if err != nil {
 		// The *url.Error names the URL and the cause, never the headers.
-		return nil, 0, c.redact(fmt.Errorf("llm: POST %s: %w", u, unwrapURL(err)))
+		return nil, 0, redact(key, fmt.Errorf("llm: POST %s: %w", u, unwrapURL(err)))
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return nil, 0, c.redact(fmt.Errorf("llm: reading the response: %w", err))
+		return nil, 0, redact(key, fmt.Errorf("llm: reading the response: %w", err))
 	}
 	if resp.StatusCode/100 != 2 {
-		se := &StatusError{Status: resp.StatusCode, Message: c.redactString(errorMessage(data))}
+		se := &StatusError{Status: resp.StatusCode, Message: redactString(key, errorMessage(data))}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			return nil, retryAfter(resp.Header.Get("Retry-After")), se
+			return nil, retryAfter(resp.Header.Get("Retry-After"), time.Now()), se
 		}
 		return nil, -1, se
 	}
@@ -228,7 +231,7 @@ func (c *Client) post(ctx context.Context, body []byte) (*Response, time.Duratio
 	}
 	if out.Error != nil {
 		// OpenRouter reports some upstream failures inside a 200.
-		return nil, 0, &StatusError{Status: resp.StatusCode, Message: c.redactString(out.Error.Message)}
+		return nil, 0, &StatusError{Status: resp.StatusCode, Message: redactString(key, out.Error.Message)}
 	}
 	if len(out.Choices) == 0 {
 		return nil, -1, errors.New("llm: the response has no choices")
@@ -244,16 +247,18 @@ func (c *Client) key() secret.String {
 	return c.Key()
 }
 
-// redact removes the key from an error, in case a server echoes it back.
-func (c *Client) redact(err error) error {
-	if k := c.key().Reveal(); k != "" && strings.Contains(err.Error(), k) {
+// redact removes the request's key from an error, in case a server echoes
+// it back. It is the key the request was sent with, which a SIGHUP may have
+// replaced meanwhile.
+func redact(key secret.String, err error) error {
+	if k := key.Reveal(); k != "" && strings.Contains(err.Error(), k) {
 		return errors.New(strings.ReplaceAll(err.Error(), k, secret.Redacted))
 	}
 	return err
 }
 
-func (c *Client) redactString(s string) string {
-	if k := c.key().Reveal(); k != "" {
+func redactString(key secret.String, s string) string {
+	if k := key.Reveal(); k != "" {
 		return strings.ReplaceAll(s, k, secret.Redacted)
 	}
 	return s
@@ -294,10 +299,15 @@ func errorMessage(body []byte) string {
 	return s
 }
 
-// retryAfter parses a Retry-After header in seconds; 0 if absent or a date.
-func retryAfter(h string) time.Duration {
-	if n, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && n > 0 {
+// retryAfter parses a Retry-After header, in seconds or as an HTTP date;
+// 0 if absent, unparseable or already past.
+func retryAfter(h string, now time.Time) time.Duration {
+	h = strings.TrimSpace(h)
+	if n, err := strconv.Atoi(h); err == nil && n > 0 {
 		return time.Duration(n) * time.Second
+	}
+	if t, err := http.ParseTime(h); err == nil && t.After(now) {
+		return t.Sub(now)
 	}
 	return 0
 }

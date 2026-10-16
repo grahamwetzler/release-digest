@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -55,21 +56,45 @@ var Schema = json.RawMessage(`{
 // Parse validates an LLM reply as a Summary. A reply may be wrapped in a
 // code fence (servers without structured output often do that). Lists are
 // trimmed of empty entries and cut to MaxItems; a missing or overlong
-// headline is an error, which earns the reply one repair retry.
+// headline, or a missing field, is an error, which earns the reply one
+// repair retry.
 func Parse(reply string) (*Summary, error) {
 	s := strings.TrimSpace(reply)
 	if rest, ok := strings.CutPrefix(s, "```"); ok {
 		rest = strings.TrimPrefix(rest, "json")
 		s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(rest), "```"))
 	}
-	var sum Summary
+	// Pointers tell a missing (or null) field from an empty one: every
+	// field is required, as in Schema.
+	var raw struct {
+		Headline  *string   `json:"headline"`
+		Breaking  *[]string `json:"breaking"`
+		Features  *[]string `json:"features"`
+		Fixes     *[]string `json:"fixes"`
+		Security  *[]string `json:"security"`
+		NoiseOnly *bool     `json:"noise_only"`
+	}
 	dec := json.NewDecoder(strings.NewReader(s))
-	if err := dec.Decode(&sum); err != nil {
+	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("the reply is not the JSON object asked for: %v", err)
 	}
 	if dec.More() {
 		return nil, errors.New("the reply has text after the JSON object")
 	}
+	var missing []string
+	for name, set := range map[string]bool{"headline": raw.Headline != nil, "breaking": raw.Breaking != nil,
+		"features": raw.Features != nil, "fixes": raw.Fixes != nil, "security": raw.Security != nil,
+		"noise_only": raw.NoiseOnly != nil} {
+		if !set {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		return nil, fmt.Errorf("the reply lacks %s", strings.Join(missing, ", "))
+	}
+	sum := Summary{Headline: *raw.Headline, Breaking: *raw.Breaking, Features: *raw.Features, Fixes: *raw.Fixes,
+		Security: *raw.Security, NoiseOnly: *raw.NoiseOnly}
 	sum.Headline = strings.Join(strings.Fields(sum.Headline), " ")
 	switch n := utf8.RuneCountInString(sum.Headline); {
 	case n == 0:
@@ -80,7 +105,17 @@ func Parse(reply string) (*Summary, error) {
 	for _, l := range []*[]string{&sum.Breaking, &sum.Features, &sum.Fixes, &sum.Security} {
 		*l = clean(*l)
 	}
+	sum.normalize()
 	return &sum, nil
+}
+
+// normalize settles a contradictory reply: a release with any listed
+// change is not noise-only, whatever noise_only says, so the item never
+// says "no user-facing changes" while marked breaking or security.
+func (s *Summary) normalize() {
+	if len(s.Breaking)+len(s.Features)+len(s.Fixes)+len(s.Security) > 0 {
+		s.NoiseOnly = false
+	}
 }
 
 // clean drops empty entries, joins each one's whitespace and cuts the list
@@ -101,6 +136,7 @@ func Decode(data string) (*Summary, error) {
 	if err := json.Unmarshal([]byte(data), &s); err != nil {
 		return nil, err
 	}
+	s.normalize()
 	return &s, nil
 }
 

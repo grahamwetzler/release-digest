@@ -185,3 +185,50 @@ func TestErrorsNeverCarryTheKey(t *testing.T) {
 		}
 	}
 }
+
+func TestLongRetryAfterFailsTheAttempt(t *testing.T) {
+	for _, ra := range []string{"120", time.Now().Add(10 * time.Minute).UTC().Format(http.TimeFormat)} {
+		f := llmtest.New(`{}`)
+		f.Queue(llmtest.Reply{Status: 429, Message: "slow down", RetryAfter: ra})
+		var slept []time.Duration
+		_, err := client(f, &slept).Complete(context.Background(), req)
+		var se *llm.StatusError
+		if !errors.As(err, &se) || se.Status != 429 || len(f.Requests()) != 1 || len(slept) != 0 {
+			t.Errorf("Retry-After %s: err %v, %d requests, slept %v", ra, err, len(f.Requests()), slept)
+		}
+		f.Close()
+	}
+	// A short HTTP-date Retry-After is waited out.
+	f := llmtest.New(`{}`)
+	defer f.Close()
+	f.Queue(llmtest.Reply{Status: 503, RetryAfter: time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)})
+	var slept []time.Duration
+	if _, err := client(f, &slept).Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(slept) != 1 || slept[0] < 25*time.Second {
+		t.Errorf("slept %v; want the HTTP-date wait", slept)
+	}
+}
+
+func TestRotatedKeyIsRedacted(t *testing.T) {
+	f := llmtest.New(`{}`)
+	defer f.Close()
+	// The server echoes the key it was sent; the key rotates mid-request.
+	f.SetDefault(func(r llmtest.Request) llmtest.Reply {
+		return llmtest.Reply{Status: 401, Message: "bad key " + r.Header.Get("Authorization")}
+	})
+	c := client(f, nil)
+	calls := 0
+	c.Key = func() secret.String {
+		calls++
+		if calls == 1 {
+			return secret.New("sk-old-key-123")
+		}
+		return secret.New("sk-new-key-456")
+	}
+	_, err := c.Complete(context.Background(), req)
+	if err == nil || strings.Contains(err.Error(), "sk-old-key-123") {
+		t.Errorf("err = %v", err)
+	}
+}

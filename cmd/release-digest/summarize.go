@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"release-digest/internal/config"
 	"release-digest/internal/github"
@@ -106,6 +107,12 @@ func cmdSummarize(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout)
 	}
+	// Resolving the notes took several requests: check again just before
+	// the notes go to the LLM (§3.1).
+	if vis, err := gh.CheckPublic(ctx, repo, 0); err != nil || !vis.Public {
+		fmt.Fprintf(stderr, "release-digest: %s is no longer confirmed public; nothing was sent to the LLM (%v)\n", repo, err)
+		return 1
+	}
 	res, err := s.Summarize(ctx, prompt, in)
 	if err != nil {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
@@ -193,6 +200,11 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 	if rel != nil && rel.PublishedAt != nil {
 		this.Published = *rel.PublishedAt
 	}
+	if this.Version == "" {
+		if err := datePredecessors(ctx, gh, repo, refs, &this, cands); err != nil {
+			return in, nil, err
+		}
+	}
 	row.PrevTag = semver.Predecessor(this, cands)
 
 	body := ""
@@ -207,6 +219,64 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 	}
 	row.NotesSource = out.Source
 	return summarize.Input{Repo: repo, Tag: tag, PrevTag: row.PrevTag, Source: out.Source, Notes: out.Text}, row, nil
+}
+
+// MaxDateLookups bounds the tag date lookups for a date-ordered tag's
+// predecessor in a dry run.
+const MaxDateLookups = 30
+
+// datePredecessors fills in the dates a date-ordered tag's predecessor
+// needs (§3.2.1): its own, unless its release gave one, and those of the
+// other date-ordered tags in its stream that the releases list didn't
+// date, up to MaxDateLookups of them.
+func datePredecessors(ctx context.Context, gh *github.Client, repo string, refs []github.TagRef, this *semver.Candidate, cands []semver.Candidate) error {
+	byName := map[string]github.TagRef{}
+	for _, r := range refs {
+		byName[r.Name] = r
+	}
+	dated := map[string]time.Time{}
+	for _, c := range cands {
+		if !c.Published.IsZero() {
+			dated[c.Tag] = c.Published
+		}
+	}
+	lookup := func(tag string) (time.Time, error) {
+		if t, ok := dated[tag]; ok {
+			return t, nil
+		}
+		ref, ok := byName[tag]
+		if !ok {
+			return time.Time{}, nil
+		}
+		t, err := gh.TagDate(ctx, repo, ref.SHA, ref.Type)
+		if err == nil {
+			dated[tag] = t
+		}
+		return t, err
+	}
+	var err error
+	if this.Published.IsZero() {
+		if this.Published, err = lookup(this.Tag); err != nil {
+			return fmt.Errorf("dating %s: %w", this.Tag, err)
+		}
+	}
+	looked := 0
+	for i := range cands {
+		c := &cands[i]
+		if c.Tag == this.Tag || c.Stream != this.Stream || c.Version != "" || !c.Published.IsZero() {
+			continue
+		}
+		if _, ok := dated[c.Tag]; !ok {
+			if looked == MaxDateLookups {
+				continue
+			}
+			looked++
+		}
+		if c.Published, err = lookup(c.Tag); err != nil {
+			return fmt.Errorf("dating %s: %w", c.Tag, err)
+		}
+	}
+	return nil
 }
 
 func orNone(s string) string {

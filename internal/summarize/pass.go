@@ -196,6 +196,12 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 		if err := s.Store.PutSummary(ctx, cached); err != nil {
 			return false, err
 		}
+		// The call can take minutes: check again before publishing, in case
+		// the repo went private meanwhile. The summary stays stored, so the
+		// next eligible pass publishes it without another call.
+		if public, err := s.Gate(ctx, r.Repo); err != nil || !public {
+			return false, err
+		}
 	}
 	ok, err := s.Store.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, s.now())
 	if err == nil && ok {

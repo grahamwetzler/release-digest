@@ -64,11 +64,11 @@ func TestLoadPromptReadsTheFile(t *testing.T) {
 }
 
 func TestParse(t *testing.T) {
-	s, err := Parse("```json\n" + `{"headline":"  Faster   builds ","features":["a"," ","b","c","d","e","f","g"],"noise_only":false}` + "\n```")
+	s, err := Parse("```json\n" + `{"headline":"  Faster   builds ","breaking":[],"features":["a"," ","b","c","d","e","f","g"],"fixes":[],"security":[],"noise_only":false}` + "\n```")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Headline != "Faster builds" || len(s.Features) != MaxItems || s.Features[1] != "b" || s.Breaking != nil {
+	if s.Headline != "Faster builds" || len(s.Features) != MaxItems || s.Features[1] != "b" || len(s.Breaking) != 0 {
 		t.Errorf("parsed %+v", s)
 	}
 	for _, bad := range []string{
@@ -82,7 +82,21 @@ func TestParse(t *testing.T) {
 			t.Errorf("Parse(%.40q) accepted", bad)
 		}
 	}
-	if _, err := Parse(`{"headline":"` + strings.Repeat("é", MaxHeadline) + `"}`); err != nil {
+	if _, err := Parse(`{"headline":"ok","breaking":[],"features":[],"fixes":[],"security":[]}`); err == nil ||
+		!strings.Contains(err.Error(), "lacks noise_only") {
+		t.Errorf("a reply without noise_only: %v", err)
+	}
+	if _, err := Parse(`{"headline":"ok","breaking":null,"features":[],"fixes":[],"security":[],"noise_only":false}`); err == nil {
+		t.Error("a null list was accepted")
+	}
+	s, err = Parse(`{"headline":"ok","breaking":["Drops X"],"features":[],"fixes":[],"security":[],"noise_only":true}`)
+	if err != nil || s.NoiseOnly {
+		t.Errorf("noise_only with a breaking change: %+v, %v", s, err)
+	}
+	if d, _ := Decode(`{"headline":"ok","security":["CVE-1"],"noise_only":true}`); d.NoiseOnly {
+		t.Error("Decode kept a contradictory noise_only")
+	}
+	if _, err := Parse(`{"headline":"` + strings.Repeat("é", MaxHeadline) + `","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":false}`); err != nil {
 		t.Errorf("a headline of %d runes was rejected: %v", MaxHeadline, err)
 	}
 }
@@ -196,8 +210,8 @@ func TestPendingAndFallbackAreSummarized(t *testing.T) {
 	if len(reqs) != 2 || !strings.Contains(reqs[0].Messages[1].Content, "Version: v1") {
 		t.Errorf("requests %d; the oldest first_seen_at goes first", len(reqs))
 	}
-	if h.gated.Load() != 2 {
-		t.Errorf("gate checked %d times, want once per release", h.gated.Load())
+	if h.gated.Load() != 4 {
+		t.Errorf("gate checked %d times, want before and after each call", h.gated.Load())
 	}
 }
 
@@ -280,7 +294,7 @@ func TestFailuresBackOff(t *testing.T) {
 func TestRepairRetry(t *testing.T) {
 	h := newHarness(t)
 	h.add("o/r", "v1", store.StatePending, t0)
-	h.fake.Queue(llmtest.Reply{Content: `{"headline":""}`})
+	h.fake.Queue(llmtest.Reply{Content: `{"headline":"","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":true}`})
 	h.pass()
 	reqs := h.fake.Requests()
 	if len(reqs) != 2 {
@@ -383,5 +397,30 @@ func TestDisabledWithoutAModel(t *testing.T) {
 	h.pass()
 	if n := len(h.fake.Requests()); n != 0 {
 		t.Errorf("%d requests with no model", n)
+	}
+}
+
+func TestRepoGoingPrivateDuringTheCallIsNotPublished(t *testing.T) {
+	h := newHarness(t)
+	h.add("o/r", "v1", store.StatePending, t0)
+	h.fake.SetDefault(func(llmtest.Request) llmtest.Reply {
+		h.deny.Store(true) // the repo turns private while the call runs
+		return llmtest.Reply{Content: good}
+	})
+	h.pass()
+	r := h.get("o/r", "v1")
+	if r.State != store.StatePending || r.Attempts != 0 {
+		t.Fatalf("state %s, attempts %d; want unpublished and not a failure", r.State, r.Attempts)
+	}
+	// Public again next tick: the stored summary is published without a call.
+	h.deny.Store(false)
+	h.tick++
+	h.confirm("o/r")
+	h.pass()
+	if r := h.get("o/r", "v1"); r.State != store.StateSummarized {
+		t.Errorf("state %s after the repo is public again", r.State)
+	}
+	if n := len(h.fake.Requests()); n != 1 {
+		t.Errorf("%d LLM requests, want the one", n)
 	}
 }

@@ -1,5 +1,5 @@
 // Package summarize turns resolved release notes into structured summaries
-// with an LLM (PLAN.md §3.3): the prompt, the cache key, validation, and the
+// with an LLM (docs/summaries.md): the prompt, the cache key, validation, and the
 // summarize pass of a tick.
 package summarize
 
@@ -20,17 +20,17 @@ import (
 
 // SchemaVersion identifies the response schema. It is part of the cache
 // key, so changing the schema never reuses a summary of the old shape.
-// Version 2 added the urgency fields (§3.4).
+// Version 2 added the urgency fields (docs/security-alerts.md).
 const SchemaVersion = 2
 
-// Limits the schema sets (§3.3).
+// Limits the schema sets (docs/summaries.md).
 const (
 	MaxHeadline = 100 // runes
 	MaxItems    = 6   // per list
 	MaxReason   = 300 // runes of security_reason
 )
 
-// Security urgencies (§3.4), lowest first.
+// Security urgencies (docs/security-alerts.md), lowest first.
 const (
 	UrgencyNone     = "none"
 	UrgencyAdvisory = "advisory"
@@ -189,7 +189,7 @@ type Endpoint struct {
 	Temperature float64
 }
 
-// Key is the summary cache key (§3.3): the SHA-256 of a canonical JSON
+// Key is the summary cache key (docs/summaries.md): the SHA-256 of a canonical JSON
 // document of everything that shapes the reply. Two releases share a
 // summary only if the LLM would see byte-identical requests.
 func Key(e Endpoint, msgs []llm.Message) string {
@@ -206,7 +206,7 @@ func Key(e Endpoint, msgs []llm.Message) string {
 }
 
 // ResummaryKey is where a resummarize's answer to the request keyed key is
-// stored (§3.3): apart from the summary already published under key, and
+// stored (docs/summaries.md): apart from the summary already published under key, and
 // one per resummarize request.
 func ResummaryKey(key string, requested time.Time) string {
 	return key + "@resummarize-" + strconv.FormatInt(requested.UnixMilli(), 10)

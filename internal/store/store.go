@@ -1,5 +1,5 @@
 // Package store persists releases, summaries, HTTP cache validators, alert
-// state and the rendered feeds in SQLite (PLAN.md §3.5, §8.1).
+// state and the rendered feeds in SQLite (docs/architecture.md).
 package store
 
 import (
@@ -57,28 +57,28 @@ var migrations = []string{
 	`CREATE TABLE releases (
 		repo                TEXT NOT NULL,              -- owner/repo, lowercased
 		tag                 TEXT NOT NULL,
-		guid                TEXT NOT NULL UNIQUE,       -- UUIDv5 (§5)
+		guid                TEXT NOT NULL UNIQUE,       -- UUIDv5 (docs/feed.md)
 		kind                TEXT NOT NULL,              -- release | tag
 		name                TEXT NOT NULL DEFAULT '',
 		html_url            TEXT NOT NULL,
-		stream              TEXT NOT NULL DEFAULT '',   -- tag prefix (§3.1.1)
+		stream              TEXT NOT NULL DEFAULT '',   -- tag prefix (docs/versions.md)
 		version             TEXT NOT NULL DEFAULT '',   -- normalized SemVer, '' if date-ordered
-		prev_tag            TEXT NOT NULL DEFAULT '',   -- §3.2.1
+		prev_tag            TEXT NOT NULL DEFAULT '',   -- docs/versions.md#predecessor-selection
 		prerelease          INTEGER NOT NULL DEFAULT 0,
 		published_at        INTEGER,                    -- frozen once set (tags: after the metadata queue)
 		first_seen_at       INTEGER NOT NULL,
-		state               TEXT NOT NULL,              -- skipped | pending | fallback | summarized | no_notes (§3.3)
+		state               TEXT NOT NULL,              -- skipped | pending | fallback | summarized | no_notes (docs/summaries.md)
 		notes_source        TEXT NOT NULL DEFAULT '',   -- release_body | changelog | compare
 		notes_hash          TEXT NOT NULL DEFAULT '',
 		summary_key         TEXT,                       -- → summaries.key
 		attempts            INTEGER NOT NULL DEFAULT 0,
-		next_attempt_at     INTEGER NOT NULL,           -- = first_seen_at on insert (§3.3)
+		next_attempt_at     INTEGER NOT NULL,           -- = first_seen_at on insert (docs/summaries.md)
 		last_error          TEXT NOT NULL DEFAULT '',
-		origin              TEXT NOT NULL,              -- live | backfill | catchup | reconcile (§3.1)
-		urgency             TEXT NOT NULL DEFAULT 'none', -- none | advisory | urgent (§3.4)
+		origin              TEXT NOT NULL,              -- live | backfill | catchup | reconcile (docs/polling.md)
+		urgency             TEXT NOT NULL DEFAULT 'none', -- none | advisory | urgent (docs/security-alerts.md)
 		urgency_source      TEXT NOT NULL DEFAULT '',   -- advisory:GHSA-… | llm
-		content_updated_at  INTEGER,                    -- Atom <updated> (§5)
-		last_verified_at    INTEGER,                    -- last successful existence check (§3.1)
+		content_updated_at  INTEGER,                    -- Atom <updated> (docs/feed.md)
+		last_verified_at    INTEGER,                    -- last successful existence check (docs/polling.md)
 		verify_attempted_at INTEGER,                    -- last attempt, any outcome; sweep order
 		missing_since       INTEGER,
 		PRIMARY KEY (repo, tag)
@@ -90,7 +90,7 @@ var migrations = []string{
 	CREATE TABLE notes (hash TEXT PRIMARY KEY, text TEXT NOT NULL);
 
 	CREATE TABLE summaries (
-		key        TEXT PRIMARY KEY,                    -- sha256 of the canonical request (§3.3)
+		key        TEXT PRIMARY KEY,                    -- sha256 of the canonical request (docs/summaries.md)
 		model      TEXT NOT NULL,
 		json       TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
@@ -106,8 +106,8 @@ var migrations = []string{
 		last_success_at           INTEGER,
 		held                      INTEGER NOT NULL DEFAULT 0,
 		visibility_confirmed_at   INTEGER,
-		visibility_confirmed_tick INTEGER,              -- tick ID of the last successful public check (§3)
-		scan_boundary             TEXT,                 -- newest tag of the last completed scan (§3.1)
+		visibility_confirmed_tick INTEGER,              -- tick ID of the last successful public check (docs/architecture.md)
+		scan_boundary             TEXT,                 -- newest tag of the last completed scan (docs/polling.md)
 		reconcile_next_page       INTEGER,
 		last_reconciled_at        INTEGER,
 		last_error                TEXT NOT NULL DEFAULT ''
@@ -136,12 +136,12 @@ var migrations = []string{
 		repo        TEXT NOT NULL,
 		tag         TEXT NOT NULL,
 		advisory_id TEXT NOT NULL,
-		matched     INTEGER NOT NULL DEFAULT 0,         -- re-evaluated on each recompute (§3.4)
-		fixes       INTEGER NOT NULL DEFAULT 0,         -- this release fixes it (§3.4)
+		matched     INTEGER NOT NULL DEFAULT 0,         -- re-evaluated on each recompute (docs/security-alerts.md)
+		fixes       INTEGER NOT NULL DEFAULT 0,         -- this release fixes it (docs/security-alerts.md)
 		PRIMARY KEY (repo, tag, advisory_id)
 	);
 
-	CREATE TABLE notifications (                        -- the alert outbox (§3.4)
+	CREATE TABLE notifications (                        -- the alert outbox (docs/security-alerts.md)
 		guid             TEXT PRIMARY KEY,              -- releases.guid: enqueued once
 		channel          TEXT NOT NULL,                 -- ntfy
 		reason           TEXT NOT NULL,                 -- advisory:GHSA-… | llm
@@ -154,21 +154,21 @@ var migrations = []string{
 		sent_at          INTEGER
 	);`,
 	// 2: a tag's ref target, for the metadata queue that resolves its date,
-	// and the queue's last attempt, so failing items rotate to the back (§3.1).
+	// and the queue's last attempt, so failing items rotate to the back (docs/polling.md).
 	`ALTER TABLE releases ADD COLUMN ref_sha TEXT NOT NULL DEFAULT '';  -- tags: what refs/tags/<tag> points at
 	ALTER TABLE releases ADD COLUMN ref_type TEXT NOT NULL DEFAULT ''; -- commit | tag (annotated)
 	ALTER TABLE releases ADD COLUMN meta_attempted_at INTEGER;
 	ALTER TABLE repo_state ADD COLUMN scan_mode TEXT NOT NULL DEFAULT '';  -- release | tag: the list last scanned
 	CREATE INDEX releases_undated ON releases (meta_attempted_at) WHERE published_at IS NULL;`,
-	// 3: notes resolution (§3.2). body_hash keeps the release body apart from
+	// 3: notes resolution (docs/notes.md). body_hash keeps the release body apart from
 	// the notes chosen for it; unresolved rows queue for resolution, and every
 	// existing row is re-resolved once.
 	`ALTER TABLE releases ADD COLUMN body_hash TEXT NOT NULL DEFAULT '';        -- → notes.hash: the release body as published
-	ALTER TABLE releases ADD COLUMN notes_resolved INTEGER NOT NULL DEFAULT 0; -- 1 once §3.2 chose notes_source (or none)
+	ALTER TABLE releases ADD COLUMN notes_resolved INTEGER NOT NULL DEFAULT 0; -- 1 once resolution (docs/notes.md) chose notes_source (or none)
 	ALTER TABLE releases ADD COLUMN resolve_attempted_at INTEGER;
 	UPDATE releases SET body_hash = notes_hash WHERE notes_source = 'release_body';
 	CREATE INDEX releases_unresolved ON releases (resolve_attempted_at) WHERE notes_resolved = 0;`,
-	// 4: security alerts (§3.4). advisories_hash is the notes_hash last
+	// 4: security alerts (docs/security-alerts.md). advisories_hash is the notes_hash last
 	// scanned for advisory IDs; urgency_dirty marks a release whose urgency
 	// inputs changed since it was last decided. Outbox rows carry their
 	// release and alert window.
@@ -183,7 +183,7 @@ var migrations = []string{
 	CREATE INDEX release_advisories_by_id ON release_advisories (advisory_id);
 	CREATE INDEX releases_urgency_dirty ON releases (repo) WHERE urgency_dirty = 1;
 	CREATE INDEX notifications_due ON notifications (state, next_attempt_at);`,
-	// 5: resummarize (§3.3) records when a fresh summary was asked for; a
+	// 5: resummarize (docs/summaries.md) records when a fresh summary was asked for; a
 	// summary created after that satisfies it, and clears it.
 	`ALTER TABLE releases ADD COLUMN resummarize INTEGER NOT NULL DEFAULT 0; -- request time, 0 for none`,
 }
@@ -254,7 +254,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
-// Release states (§3.3).
+// Release states (docs/summaries.md).
 const (
 	StateSkipped    = "skipped"
 	StatePending    = "pending"
@@ -263,7 +263,7 @@ const (
 	StateNoNotes    = "no_notes"
 )
 
-// MissingGrace is how long a confirmed-deleted release stays in the feed (§5).
+// MissingGrace is how long a confirmed-deleted release stays in the feed (docs/feed.md).
 const MissingGrace = 7 * 24 * time.Hour
 
 // Release is one stored release or tag. Fields are added as milestones need them.
@@ -293,12 +293,12 @@ type Release struct {
 	LastVerified   time.Time
 	VerifyAttempt  time.Time
 	BodyHash       string // → notes.hash: the release body; "" for none
-	NotesResolved  bool   // notes_source is final: "" then means no notes (§3.2)
+	NotesResolved  bool   // notes_source is final: "" then means no notes (docs/notes.md)
 	ResolveAttempt time.Time
 	SummaryKey     string // → summaries.key; "" until summarized
-	Attempts       int    // failed summarize attempts (§3.3)
+	Attempts       int    // failed summarize attempts (docs/summaries.md)
 	LastError      string
-	Resummarize    time.Time // when resummarize asked for a fresh summary; zero for none (§3.3)
+	Resummarize    time.Time // when resummarize asked for a fresh summary; zero for none (docs/summaries.md)
 }
 
 const releaseColumns = `repo, tag, guid, kind, name, html_url, stream, version, prev_tag, prerelease,
@@ -330,10 +330,10 @@ func scanRelease(row interface{ Scan(...any) error }) (*Release, error) {
 
 // InsertRelease adds a newly discovered release. A release already stored
 // under (repo, tag) is left unchanged, so published_at and the GUID stay
-// frozen (§5); it reports whether a row was inserted.
+// frozen (docs/feed.md); it reports whether a row was inserted.
 func (s ops) InsertRelease(ctx context.Context, r *Release) (bool, error) {
 	if r.NextAttempt.IsZero() {
-		r.NextAttempt = r.FirstSeen // §3.3: due at once
+		r.NextAttempt = r.FirstSeen // due at once (docs/summaries.md)
 	}
 	if r.Urgency == "" {
 		r.Urgency = "none"

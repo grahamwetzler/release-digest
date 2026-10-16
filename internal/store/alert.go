@@ -8,14 +8,14 @@ import (
 	"time"
 )
 
-// Urgencies (§3.4).
+// Urgencies (docs/security-alerts.md).
 const (
 	UrgencyNone     = "none"
 	UrgencyAdvisory = "advisory"
 	UrgencyUrgent   = "urgent"
 )
 
-// Advisory is a cached advisory lookup (§3.4). JSON holds the advisories
+// Advisory is a cached advisory lookup (docs/security-alerts.md). JSON holds the advisories
 // found under the ID as an array: one for a GHSA ID, possibly several for a
 // CVE ID.
 type Advisory struct {
@@ -102,7 +102,7 @@ func (s ops) linkIDs(ctx context.Context, repo, tag string) ([]string, error) {
 
 // AdvisoriesDue returns up to n advisory IDs due for a lookup: next_fetch_at
 // reached, and linked to a release that is pending or visible and not
-// deleted for longer than MissingGrace (§3.4). Never-fetched IDs come first.
+// deleted for longer than MissingGrace (docs/security-alerts.md). Never-fetched IDs come first.
 func (s ops) AdvisoriesDue(ctx context.Context, now time.Time, n int) ([]string, error) {
 	rows, err := s.q.QueryContext(ctx, `SELECT a.id FROM advisories a WHERE a.next_fetch_at <= ?1
 		AND EXISTS (SELECT 1 FROM release_advisories ra JOIN releases r ON r.repo = ra.repo AND r.tag = ra.tag
@@ -219,7 +219,7 @@ func (s ops) UrgencyDirty(ctx context.Context, tick int64) ([]*Release, error) {
 }
 
 // MarkAllUrgencyDirty marks every release that isn't skipped for an urgency
-// recompute, after a config change to its inputs (§3.4).
+// recompute, after a config change to its inputs (docs/security-alerts.md).
 func (s ops) MarkAllUrgencyDirty(ctx context.Context) (int64, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE releases SET urgency_dirty = 1 WHERE state != ?`, StateSkipped)
 	if err != nil {
@@ -229,7 +229,7 @@ func (s ops) MarkAllUrgencyDirty(ctx context.Context) (int64, error) {
 }
 
 // SetUrgency records a release's recomputed urgency and clears its dirty
-// mark. A change on a visible release is a content change (§1), so it
+// mark. A change on a visible release is a content change (docs/feed.md), so it
 // advances content_updated_at. It reports whether the urgency changed.
 func (s ops) SetUrgency(ctx context.Context, repo, tag, urgency, source string, at time.Time) (bool, error) {
 	var old string

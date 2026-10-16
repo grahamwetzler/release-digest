@@ -35,8 +35,8 @@ const stateLastTick = "last_tick"
 const guardTimeout = 30 * time.Second
 
 // tick runs one scheduler pass: the visibility sweep and poll (once the
-// token guard has passed), the summarize stage, the alert stage (§3.4),
-// the gated promotion of due fallbacks, and the render, which always runs (§3). last_tick is recorded only after a fully
+// token guard has passed), the summarize stage, the alert stage (docs/security-alerts.md),
+// the gated promotion of due fallbacks, and the render, which always runs (docs/architecture.md). last_tick is recorded only after a fully
 // successful pass, so a restart after a failed one retries at once.
 func (e *env) tick(ctx context.Context, srv *server.Server) error {
 	start := time.Now()
@@ -84,8 +84,8 @@ func (e *env) tick(ctx context.Context, srv *server.Server) error {
 
 // summarize runs the summarize stage. It always runs after poll, whatever
 // poll's outcome; its gate is the tick's confirmations plus a just-in-time
-// check (§3.1). Every few summaries it publishes a render, so a long stage
-// shows its progress (§3).
+// check (docs/polling.md). Every few summaries it publishes a render, so a long stage
+// shows its progress (docs/architecture.md).
 func (e *env) summarize(ctx context.Context, tick int64, srv *server.Server) error {
 	e.summ.Gate = func(ctx context.Context, repo string) (bool, error) {
 		return e.poller.CheckNow(ctx, repo, tick, "summarize")
@@ -124,7 +124,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// A changed alert config marks every release for an urgency recompute
-	// before the outbox starts, so no alert it made stale is sent (§3.4).
+	// before the outbox starts, so no alert it made stale is sent (docs/security-alerts.md).
 	if err := e.alerts.CheckConfig(ctx); err != nil {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return 1
@@ -226,7 +226,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// reloadSecrets re-reads every secret on SIGHUP (§4.3). If any fails, every
+// reloadSecrets re-reads every secret on SIGHUP (docs/secrets.md). If any fails, every
 // secret keeps its current value: a half-applied rotation is worse than none.
 func (e *env) reloadSecrets(env secret.Env) {
 	loaded, err := loadSecrets(env)
@@ -235,7 +235,7 @@ func (e *env) reloadSecrets(env secret.Env) {
 		return
 	}
 	// A replacement GitHub token must pass the token guard before it is
-	// activated; if it fails or can't be checked, nothing is reloaded (§3.1).
+	// activated; if it fails or can't be checked, nothing is reloaded (docs/polling.md).
 	newTok := loaded[secGitHub].Value
 	if newTok.Reveal() != e.secrets.GitHub.Get().Value.Reveal() {
 		ctx, cancel := context.WithTimeout(context.Background(), guardTimeout)
@@ -263,7 +263,7 @@ func (e *env) reloadSecrets(env secret.Env) {
 }
 
 // health is the /healthz status: degraded while an expired alert awaits
-// acknowledgement (§3.4).
+// acknowledgement (docs/security-alerts.md).
 func (e *env) health(ctx context.Context) error {
 	n, err := e.store.ExpiredUnacked(ctx)
 	if err != nil {

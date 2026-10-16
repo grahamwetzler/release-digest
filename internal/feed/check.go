@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Check verifies an RSS document without the network (§7.3, schema checks):
+// Check verifies an RSS document without the network (schema checks):
 // well-formed XML, required elements, RFC 822 dates, unique GUIDs, absolute
 // links, and items sorted newest first. It returns one message per problem.
 func Check(data []byte) []string {

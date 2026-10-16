@@ -10,7 +10,7 @@ import (
 	"release-digest/internal/summarize"
 )
 
-// Body limits (§3.4): ntfy turns a message over 4,096 bytes into an
+// Body limits (docs/security-alerts.md): ntfy turns a message over 4,096 bytes into an
 // attachment, so the body stays well below.
 const (
 	BodyBudget  = 3500 // UTF-8 bytes
@@ -50,7 +50,7 @@ func DecodePayload(s string) (Payload, error) {
 	return p, err
 }
 
-// BuildPayload is the alert for an urgent release (§3.4). The links are in
+// BuildPayload is the alert for an urgent release (docs/security-alerts.md). The links are in
 // Click and Actions, so they survive any truncation of the body.
 func BuildPayload(r *store.Release, sum *summarize.Summary, d Decision) Payload {
 	p := Payload{

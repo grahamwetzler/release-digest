@@ -1,4 +1,4 @@
-// Package server serves the rendered feed over HTTP (PLAN.md §3.6): RSS,
+// Package server serves the rendered feed over HTTP (docs/feed.md): RSS,
 // Atom, an index page and a health probe. Handlers only read; the scheduler
 // replaces the served bytes with Set after each render.
 package server

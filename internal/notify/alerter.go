@@ -16,7 +16,7 @@ import (
 	"release-digest/internal/summarize"
 )
 
-// Tuning that the plan fixes rather than configures (§3.4).
+// Tuning that is fixed rather than configured (docs/security-alerts.md).
 const (
 	ScansPerTick    = 200 // releases scanned for advisory IDs per tick
 	LookupsPerTick  = 20  // advisory lookups per tick
@@ -32,7 +32,7 @@ const stateFingerprint = "urgency_fingerprint"
 
 // Alerter runs the alert stage of a tick: it finds advisory IDs in notes,
 // looks them up, and recomputes the urgency of releases whose inputs
-// changed, enqueuing or cancelling their alerts (§3.4).
+// changed, enqueuing or cancelling their alerts (docs/security-alerts.md).
 type Alerter struct {
 	Store *store.Store
 	GH    *github.Client
@@ -55,7 +55,7 @@ func (a *Alerter) now() time.Time {
 }
 
 // Pass is the alert stage. It runs only for repos confirmed in tick, like
-// every stage that changes what the feed shows (§3.1). Advisory lookups
+// every stage that changes what the feed shows (docs/polling.md). Advisory lookups
 // name only an advisory ID, never a repo. Only store failures are returned.
 func (a *Alerter) Pass(ctx context.Context, tick int64) error {
 	due, err := a.Store.AdvisoryScansDue(ctx, tick, ScansPerTick)
@@ -86,8 +86,8 @@ func (a *Alerter) Pass(ctx context.Context, tick int64) error {
 	return nil
 }
 
-// lookups refreshes up to LookupsPerTick due advisories (§3.4, advisory
-// caching). A rate limit or shutdown ends the batch; it resumes next tick.
+// lookups refreshes up to LookupsPerTick due advisories (docs/security-alerts.md).
+// A rate limit or shutdown ends the batch; it resumes next tick.
 func (a *Alerter) lookups(ctx context.Context) error {
 	now := a.now()
 	ids, err := a.Store.AdvisoriesDue(ctx, now, LookupsPerTick)
@@ -169,7 +169,7 @@ func parsed(id string, data json.RawMessage, now time.Time) (store.Advisory, err
 
 // Recompute decides a release's urgency from its current inputs and, in
 // the same transaction, records it and enqueues, rebuilds or cancels its
-// alert (§3.4).
+// alert (docs/security-alerts.md).
 func (a *Alerter) Recompute(ctx context.Context, repo, tag string) error {
 	var enqueued bool
 	var d Decision
@@ -292,7 +292,7 @@ func (a *Alerter) outbox(ctx context.Context, tx *store.Tx, r *store.Release, su
 
 const whyTooOld = "published longer ago than notify.max_age"
 
-// eligible reports whether r may alert (§3.4): alerts are on, it was
+// eligible reports whether r may alert (docs/security-alerts.md): alerts are on, it was
 // published after tracking began (unless include_backfill) and within
 // max_age, and it is no pre-release (unless include_prereleases).
 func (a *Alerter) eligible(ctx context.Context, tx *store.Tx, r *store.Release, now time.Time) (bool, string, error) {
@@ -334,7 +334,7 @@ func RepoOptions(c *config.Config, repo string) config.RepoOptions {
 	return c.Defaults
 }
 
-// Fingerprint identifies the config that urgency decisions read (§3.4).
+// Fingerprint identifies the config that urgency decisions read (docs/security-alerts.md).
 func Fingerprint(c *config.Config, enabled bool) string {
 	type repo struct {
 		Packages   []config.Package `json:"packages"`
@@ -366,7 +366,7 @@ func pattern(r *config.Regex) string {
 }
 
 // CheckConfig compares the urgency config with the one stored and, if it
-// changed, marks every release for an urgency recompute (§3.4). It runs at
+// changed, marks every release for an urgency recompute (docs/security-alerts.md). It runs at
 // startup, before the outbox worker: an alert waits while its release is
 // marked, so one made stale by the change is cancelled before it can be sent.
 func (a *Alerter) CheckConfig(ctx context.Context) error {

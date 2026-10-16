@@ -25,8 +25,8 @@ Ollama, LM Studio, vLLM or OpenAI.
   before any of its content is fetched or sent to the LLM. A repo that turns
   private is held until it's public again.
 
-The design, including every state transition and failure mode, is in
-[PLAN.md](PLAN.md).
+How it works, including every state transition and failure mode, is
+documented in [docs/](docs/README.md).
 
 ## Quick start (Docker Compose)
 
@@ -138,12 +138,14 @@ repos:
 default for every repo under `defaults:`; a repo's own `instructions` replace
 it. They steer the headline and which changes the summary includes and puts
 first, never what it claims. Security fixes are always listed and rated as if
-there were no instructions, so they can't hide a fix or suppress an alert. Editing them applies to new releases;
-run `release-digest resummarize --repo owner/repo` to redo existing ones. Up to
+there were no instructions, so they can't hide a fix or suppress an alert.
+Editing them applies to new releases; run
+`release-digest resummarize --repo owner/repo` to redo existing ones. Up to
 2000 characters.
 
-PLAN.md §4.2 lists every setting with its default. The config is read once at
-startup; restart the service to apply a change.
+[docs/configuration.md](docs/configuration.md) lists every setting with its
+default. The config is read once at startup; restart the service to apply a
+change.
 
 ### Secrets
 
@@ -228,11 +230,18 @@ releases. Each one keeps its current summary until the new one is ready.
 ## Development
 
 ```sh
-go run ./cmd/release-digest run   # uses ./release-digest.yaml and serves on 127.0.0.1:8080
+go run ./cmd/release-digest run   # reads ./release-digest.yaml (gitignored; create your own)
 make test                         # go test ./...
-make lint                         # config lint --offline on both configs
+make lint                         # config lint --offline on deploy/release-digest.yaml
 make validate                     # W3C-validate a feed built with `release-digest build`
 ```
 
+[docs/development.md](docs/development.md) has a sample local config and the
+test strategy.
+
 Go 1.27 or later. SQLite is the pure-Go `modernc.org/sqlite`, so builds need no
 CGO and cross-compile cleanly.
+
+## License
+
+[MIT](LICENSE)

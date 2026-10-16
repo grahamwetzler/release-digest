@@ -26,7 +26,7 @@ import (
 	semver "release-digest/internal/version"
 )
 
-// cmdSummarize is a dry run for one release (§7): it resolves the notes
+// cmdSummarize is a dry run for one release (docs/development.md): it resolves the notes
 // from GitHub, calls the LLM and prints the result. It writes nothing: the
 // store isn't opened, GitHub responses aren't cached, and the predecessor
 // is worked out from GitHub's lists rather than the stored history.
@@ -111,7 +111,7 @@ func cmdSummarize(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout)
 	}
 	// Resolving the notes took several requests: check again just before
-	// the notes go to the LLM (§3.1).
+	// the notes go to the LLM (docs/polling.md).
 	if vis, err := gh.CheckPublic(ctx, repo, 0); err != nil || !vis.Public {
 		fmt.Fprintf(stderr, "release-digest: %s is no longer confirmed public; nothing was sent to the LLM (%v)\n", repo, err)
 		return 1
@@ -133,8 +133,8 @@ func cmdSummarize(args []string, stdout, stderr io.Writer) int {
 }
 
 // dryRunNotes finds the release on GitHub and resolves its notes as the
-// poll stage would (§3.2), returning the summarize input and a release row
-// for rendering. The repo must pass the public check (§3.1).
+// poll stage would (docs/notes.md), returning the summarize input and a release row
+// for rendering. The repo must pass the public check (docs/public-only.md).
 //
 // warn, if set, says the predecessor could not be determined.
 func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, repo, tag string) (in summarize.Input, row *store.Release, warn string, err error) {
@@ -235,7 +235,7 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 const MaxDateLookups = 30
 
 // datePredecessors fills in the dates a date-ordered tag's predecessor
-// needs (§3.2.1): its own, unless its release gave one, and those of the
+// needs (docs/versions.md): its own, unless its release gave one, and those of the
 // other date-ordered tags in its stream that the releases list didn't
 // date. It dates at most MaxDateLookups of them and reports false if more
 // were needed: then the predecessor can't be determined.

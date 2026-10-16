@@ -1,6 +1,6 @@
 // Package notes resolves the raw text the LLM sees for a release: its body,
 // the matching changelog section, or the commit log since its predecessor,
-// truncated to the input budget (PLAN.md §3.2).
+// truncated to the input budget (docs/notes.md).
 package notes
 
 import (
@@ -38,7 +38,7 @@ func substance(body string) string {
 
 // Substantive reports whether a release body stands on its own as notes: at
 // least MinBody characters besides boilerplate, and not a pointer to the
-// changelog (§3.2).
+// changelog (docs/notes.md).
 func Substantive(body string) bool {
 	s := substance(body)
 	return utf8.RuneCountInString(s) >= MinBody && !pointer.MatchString(s)
@@ -89,7 +89,7 @@ func Truncate(text string, n int) string {
 	return strings.TrimRight(head, " \t\r\n") + TruncatedMarker
 }
 
-// Compare-fallback limits (§3.2).
+// Compare-fallback limits (docs/notes.md).
 const (
 	MaxCompareCommits = 250 // a larger range likely has an unrelated predecessor
 	MaxCommits        = 100 // subjects kept, newest first

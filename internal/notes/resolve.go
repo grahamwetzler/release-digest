@@ -10,13 +10,13 @@ import (
 )
 
 // ChangelogFiles are searched, in order and ignoring case, at the root of
-// the repo when the changelog setting is auto (§3.2).
+// the repo when the changelog setting is auto (docs/notes.md).
 var ChangelogFiles = []string{"CHANGELOG.md", "CHANGES.md", "HISTORY.md", "NEWS.md"}
 
 // Request is a release to resolve notes for.
 type Request struct {
 	Repo, Tag string
-	Stream    string // the tag's stream prefix (§3.1.1)
+	Stream    string // the tag's stream prefix (docs/versions.md)
 	Version   string // normalized; "" for a date-ordered tag, which has no changelog section
 	PrevTag   string // "" if unknown: no compare fallback
 	Body      string // the release body; "" for a tag
@@ -46,7 +46,7 @@ func FromBody(body string, maxChars int) (Result, bool) {
 	return Result{SourceBody, Truncate(body, maxChars)}, true
 }
 
-// Resolve picks the notes for req (§3.2), in order: a substantive body; the
+// Resolve picks the notes for req (docs/notes.md), in order: a substantive body; the
 // changelog section; a body that pointed at a changelog without one, if it
 // is long enough to stand alone; the commit log since the predecessor; a
 // short body that says more than "see the changelog"; else none. Any error but a 404 is
@@ -92,7 +92,7 @@ func versionText(req Request) string {
 
 // changelog finds the release's changelog section at its tag, then at the
 // default branch: some projects add the section after tagging, and a
-// later recheck can then find it (§3.3, no_notes → fallback).
+// later recheck can then find it (docs/notes.md#the-resolution-queue).
 func (r *Resolver) changelog(ctx context.Context, req Request) (string, error) {
 	v := versionText(req)
 	if v == "" || req.Changelog == "off" {
@@ -166,7 +166,7 @@ type Entry = github.Entry
 
 // compare is the commit-log fallback. It is "" when there is no
 // predecessor, either ref is gone, the range diverged, is empty or is too
-// large, or every commit is noise (§3.2).
+// large, or every commit is noise (docs/notes.md).
 func (r *Resolver) compare(ctx context.Context, req Request) (string, error) {
 	if req.PrevTag == "" {
 		return "", nil

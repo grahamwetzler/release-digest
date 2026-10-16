@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Outbox states (§3.4).
+// Outbox states (docs/security-alerts.md).
 const (
 	AlertQueued    = "queued"
 	AlertSending   = "sending"
@@ -74,7 +74,7 @@ func (s ops) Enqueue(ctx context.Context, n *Notification) (bool, error) {
 }
 
 // Rebuild replaces an unsent alert's reason, payload and window after the
-// release escalated again (§3.4): a cancelled row returns to queued, due at
+// release escalated again (docs/security-alerts.md): a cancelled row returns to queued, due at
 // once; a sending row has its cancel request cleared, so a failed POST
 // re-queues it. Sent and expired rows are never touched. It reports
 // whether the row is now queued or sending.
@@ -92,7 +92,7 @@ func (s ops) Rebuild(ctx context.Context, guid, reason, payload string, expires,
 	return c > 0, err
 }
 
-// Cancel withdraws an unsent alert after de-escalation (§3.4): a queued row
+// Cancel withdraws an unsent alert after de-escalation (docs/security-alerts.md): a queued row
 // is cancelled; a sending row gets cancel_requested, and the claim's
 // outcome decides it.
 func (s ops) Cancel(ctx context.Context, guid string) error {
@@ -104,8 +104,8 @@ func (s ops) Cancel(ctx context.Context, guid string) error {
 	return err
 }
 
-// ResetSending returns rows left sending by a crash to queued (§3.4,
-// crash safety). It runs before the outbox worker starts.
+// ResetSending returns rows left sending by a crash to queued
+// (docs/security-alerts.md). It runs before the outbox worker starts.
 func (s ops) ResetSending(ctx context.Context) (int64, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE notifications SET state = CASE WHEN cancel_requested = 1 THEN ? ELSE ? END,
 		cancel_requested = 0 WHERE state = ?`, AlertCancelled, AlertQueued, AlertSending)
@@ -149,7 +149,7 @@ func (s *Store) Expire(ctx context.Context, now time.Time) ([]*Notification, err
 }
 
 // Claim atomically moves the next due queued alert to sending and returns
-// it, or nil if none is due (§3.4). An alert waits while its release's
+// it, or nil if none is due (docs/security-alerts.md). An alert waits while its release's
 // urgency awaits a recompute (marked dirty, or notes not yet rescanned for
 // advisory IDs), while the release is confirmed deleted, and while its
 // repo is held.
@@ -176,7 +176,7 @@ func (s *Store) Claim(ctx context.Context, now time.Time) (*Notification, error)
 	return n, err
 }
 
-// Sendable re-reads a claimed alert immediately before its POST (§3.4): it
+// Sendable re-reads a claimed alert immediately before its POST (docs/security-alerts.md): it
 // returns the row if it is still sending with no cancel request, its repo
 // isn't held (another check may have found it private since the worker's
 // own), and its release still passes Claim's conditions (no pending
@@ -199,7 +199,7 @@ func (s ops) Sendable(ctx context.Context, guid string) (*Notification, error) {
 // its alert to be claimed or sent.
 const releaseSendable = `COALESCE(rs.held, 0) = 0 AND r.urgency_dirty = 0 AND r.advisories_hash = r.notes_hash AND r.missing_since IS NULL`
 
-// Finish ends a claim in exactly one state (§3.4): sent on a 2xx; else
+// Finish ends a claim in exactly one state (docs/security-alerts.md): sent on a 2xx; else
 // cancelled if a cancel was requested; else queued again for next, with
 // the attempt counted. It returns the final state ("" if the row wasn't
 // sending) and whether a cancel had been requested.
@@ -232,7 +232,7 @@ func (s ops) Finish(ctx context.Context, guid string, sent bool, next time.Time,
 }
 
 // ExpiredUnacked counts expired alerts not yet acknowledged: /healthz
-// reports them as degraded (§3.4).
+// reports them as degraded (docs/security-alerts.md).
 func (s *Store) ExpiredUnacked(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notifications WHERE state = ? AND acked_at IS NULL`, AlertExpired).Scan(&n)

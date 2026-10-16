@@ -17,7 +17,7 @@ import (
 	"release-digest/internal/secret"
 )
 
-// SendTimeout bounds one POST to ntfy (§3.4).
+// SendTimeout bounds one POST to ntfy (docs/security-alerts.md).
 const SendTimeout = 10 * time.Second
 
 // Ntfy publishes alerts to one ntfy topic.

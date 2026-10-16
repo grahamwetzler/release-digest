@@ -1,5 +1,5 @@
 // Package secret loads secrets from exactly one source: a *_FILE path, a
-// default Docker secret file, or a plain env var (PLAN.md §4.3). Values are
+// default Docker secret file, or a plain env var (docs/secrets.md). Values are
 // held in a String that never prints.
 package secret
 

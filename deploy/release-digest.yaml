@@ -1,6 +1,6 @@
 # The config baked into the image. Repos usually come from
 # RELEASE_DIGEST_REPOS in compose.yaml; list per-repo options here.
-# Secrets never go in this file (PLAN.md §4.3).
+# Secrets never go in this file (docs/secrets.md).
 version: 1
 
 store_path: /data/release-digest.db

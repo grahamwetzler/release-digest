@@ -1,5 +1,5 @@
 // Package version classifies tags into a stream prefix and a lenient SemVer
-// version, and picks each version's predecessor (PLAN.md §3.1.1, §3.2.1).
+// version, and picks each version's predecessor (docs/versions.md).
 package version
 
 import (
@@ -54,7 +54,7 @@ func Parse(tag string, pre *regexp.Regexp) Version {
 	start := versionStart(tag)
 	if start < 0 {
 		// Date-ordered: such tags (latest, stable…) share one stream, the
-		// empty one, and are ordered among themselves by date (§3.2.1).
+		// empty one, and are ordered among themselves by date (docs/versions.md).
 		return Version{}
 	}
 	v := Version{Stream: tag[:start]}
@@ -214,7 +214,7 @@ type Candidate struct {
 }
 
 // Predecessor picks this version's predecessor from cands, which may include
-// this version itself and skipped versions (§3.2.1):
+// this version itself and skipped versions (docs/versions.md):
 //   - only the same stream counts;
 //   - a parsed version takes the highest lower version; a stable one skips pre-releases;
 //   - a date-ordered tag takes the latest one in its stream published before it.

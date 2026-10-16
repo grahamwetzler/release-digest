@@ -55,7 +55,7 @@ type atomEntry struct {
 	Media      *mediaContent  `xml:"media:content"`
 }
 
-// AtomDate formats a time for Atom: RFC 3339 in UTC (§5.6).
+// AtomDate formats a time for Atom: RFC 3339 in UTC.
 func AtomDate(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // AtomID is an entry's Atom id: the permalink itself, or a urn:uuid: for a
@@ -67,7 +67,7 @@ func AtomID(it Item) string {
 	return "urn:uuid:" + it.GUID
 }
 
-// Atom renders an Atom 1.0 document (§7.2). Items are written in the order
+// Atom renders an Atom 1.0 document. Items are written in the order
 // given. ch.SelfURL is the Atom feed's own URL, which is also its id.
 func Atom(ch Channel, items []Item) ([]byte, error) {
 	f := atomFeed{

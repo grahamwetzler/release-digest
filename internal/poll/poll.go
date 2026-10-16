@@ -1,7 +1,7 @@
 // Package poll is the GitHub stage of a tick: the visibility sweep, the
 // per-repo scans, reconciliation, the tag metadata queue, notes resolution,
-// deletion checks, and the gated promotion at render time (PLAN.md §3,
-// §3.1, §3.2).
+// deletion checks, and the gated promotion at render time (docs/architecture.md,
+// docs/polling.md, docs/notes.md).
 package poll
 
 import (
@@ -27,7 +27,7 @@ import (
 	"release-digest/internal/version"
 )
 
-// Tuning that the plan fixes rather than configures (§3, §3.1).
+// Tuning that is fixed rather than configured (docs/architecture.md, docs/polling.md).
 const (
 	SweepConcurrency = 8
 	SweepTimeout     = 10 * time.Second
@@ -57,7 +57,7 @@ type Poller struct {
 	// checkMu serializes recording just-in-time checks, which concurrent
 	// summarize workers make. lost latches a repo whose check failed in a
 	// tick: a public answer recorded later in that tick, possibly to a
-	// request sent earlier, doesn't restore its confirmation (§3.1).
+	// request sent earlier, doesn't restore its confirmation (docs/public-only.md).
 	checkMu sync.Mutex
 	lost    map[string]int64 // repo → tick
 }
@@ -70,7 +70,7 @@ func (p *Poller) now() time.Time {
 }
 
 // NextTick allocates the next tick ID. Confirmations are only valid for the
-// tick that made them (§3.1, processing gate).
+// tick that made them (docs/public-only.md#the-processing-gate).
 func (p *Poller) NextTick(ctx context.Context) (int64, error) {
 	var id int64
 	err := p.Store.Tx(ctx, func(tx *store.Tx) error {
@@ -103,7 +103,7 @@ func rotate(repos []*config.Repo, cursor string, after bool) []*config.Repo {
 }
 
 // Sweep checks every repo's visibility at the start of a tick, 8 at a time,
-// within sweep_budget (§3). Repos it doesn't confirm are unverified for this
+// within sweep_budget (docs/architecture.md). Repos it doesn't confirm are unverified for this
 // tick. The cursor moves past the last repo attempted, so repos that time
 // out rotate to the back.
 func (p *Poller) Sweep(ctx context.Context, tick int64) error {
@@ -186,7 +186,7 @@ func (p *Poller) recordVisibility(ctx context.Context, repo string, tick int64, 
 }
 
 // CheckNow is the just-in-time public check before an exposing action
-// (§3.1), such as a promotion or an LLM call. Any outcome but public invalidates the tick's confirmation.
+// (docs/public-only.md), such as a promotion or an LLM call. Any outcome but public invalidates the tick's confirmation.
 //
 // Once a check fails in a tick, the repo stays unconfirmed for the rest of
 // it, whatever later checks answer: with concurrent checks, an answer
@@ -212,7 +212,7 @@ func (p *Poller) CheckNow(ctx context.Context, repo string, tick int64, during s
 
 // Poll polls repos round-robin from the persisted cursor within poll_budget,
 // then drains the tag metadata queue, resolves notes and runs the rotating
-// deletion checks (§3.1, §3.2). The budget is checked between repos, pages of a reconciliation,
+// deletion checks (docs/polling.md, docs/notes.md). The budget is checked between repos, pages of a reconciliation,
 // and queue items; a repo's scan, once started, always finishes. Only store
 // failures are returned; GitHub failures are logged and recorded per repo.
 func (p *Poller) Poll(ctx context.Context, tick int64) error {
@@ -379,14 +379,14 @@ func TagURL(api, repo, tag string) string {
 
 // pollRepo is one repo's unit of poll work: the scan, the window deletion
 // checks and, when due, reconciliation. It runs only for a repo this tick's
-// sweep confirmed public (§3.1 step 0, processing gate); fetching content
+// sweep confirmed public (docs/public-only.md#the-processing-gate); fetching content
 // exposes nothing, so it needs no just-in-time check of its own.
 func (p *Poller) pollRepo(ctx context.Context, r *config.Repo, tick int64, b *budget) error {
 	ok, err := p.Store.Confirmed(ctx, r.Name(), tick)
 	if err != nil || !ok {
 		return storeErr(err)
 	}
-	start := p.now() // before page 1: a release published during the request is live (§3.1)
+	start := p.now() // before page 1: a release published during the request is live (docs/polling.md)
 	var page1 []entry
 	if slices.Contains(r.Sources, "releases") {
 		if page1, err = p.releasesPage(ctx, r, 1); err != nil {
@@ -430,7 +430,7 @@ func (p *Poller) finishScan(rs *store.RepoState, m mode, start time.Time) {
 
 // scanReleases takes page 1 of the releases list, fetched at start, and, when the scan
 // boundary isn't on it, reads catch-up pages up to max_pages, then commits
-// everything in one transaction (§3.1 step 3). On any error nothing is
+// everything in one transaction (docs/polling.md). On any error nothing is
 // written and the boundary stays put.
 func (p *Poller) scanReleases(ctx context.Context, r *config.Repo, page1 []entry, start time.Time) error {
 	name := r.Name()
@@ -539,7 +539,7 @@ func (p *Poller) scanReleases(ctx context.Context, r *config.Repo, page1 []entry
 }
 
 // scanTags reads the repo's complete tag list and records every tag not yet
-// stored (§3.1 step 2). On first sight the highest `backfill` versions are
+// stored (docs/polling.md). On first sight the highest `backfill` versions are
 // pending and the rest skipped; after that every new tag is live. Tag rows
 // get their date later, from the metadata queue.
 func (p *Poller) scanTags(ctx context.Context, r *config.Repo) ([]entry, error) {
@@ -657,7 +657,7 @@ func patternOf(r *config.Regex) *regexp.Regexp {
 	return r.Re
 }
 
-// filtered reports whether a row is recorded as skipped (§3.1 step 4):
+// filtered reports whether a row is recorded as skipped (docs/polling.md):
 // unrecognized tags (unless tag_pattern matches them), tag_pattern misses,
 // exclude_pattern matches and unwanted pre-releases.
 func (p *Poller) filtered(r *config.Repo, row *store.Release) bool {
@@ -677,7 +677,7 @@ func (p *Poller) filtered(r *config.Repo, row *store.Release) bool {
 
 // bodyNotes records a release body on a new row. A substantive body is
 // the notes, resolved at once with no request; any other body is
-// provisional notes until the resolution queue decides (§3.2).
+// provisional notes until the resolution queue decides (docs/notes.md).
 func (p *Poller) bodyNotes(ctx context.Context, tx *store.Tx, row *store.Release, body string) error {
 	body = strings.TrimSpace(body)
 	if body == "" {
@@ -712,7 +712,7 @@ func (p *Poller) insert(ctx context.Context, tx *store.Tx, row *store.Release, e
 
 // refreshNotes applies an edited release body, including one edited to
 // empty, to a stored release whose notes may still change: the notes are
-// resolved again, at once if the new body is substantive (§3.3).
+// resolved again, at once if the new body is substantive (docs/summaries.md).
 func (p *Poller) refreshNotes(ctx context.Context, tx *store.Tx, repo string, e entry) error {
 	if e.Kind != "release" {
 		return nil
@@ -729,7 +729,7 @@ func (p *Poller) refreshNotes(ctx context.Context, tx *store.Tx, repo string, e 
 }
 
 // setPredecessors records prev_tag for newly inserted, non-skipped rows from
-// every stored row in their stream (§3.2.1).
+// every stored row in their stream (docs/versions.md).
 func setPredecessors(ctx context.Context, tx *store.Tx, rows []*store.Release) error {
 	streams := map[[2]string][]version.Candidate{}
 	for _, r := range rows {
@@ -762,7 +762,7 @@ func candidate(r *store.Release) version.Candidate {
 }
 
 // windowChecks runs existence checks on stored visible rows that should have
-// been in the list but weren't (§3.1, deletion detection). With a complete
+// been in the list but weren't (docs/polling.md#deletion-detection). With a complete
 // list (tags), that is every visible tag row missing from it. The releases
 // list is newest first, so a stored release newer than page 1's oldest
 // entry belongs on it; an empty page 1 makes every visible row a candidate.
@@ -826,20 +826,20 @@ func (p *Poller) verify(ctx context.Context, r *store.Release) error {
 }
 
 // publishWindow is how old a reconciled release may be and still be
-// published: max(7d, notify.max_age) (§3.1).
+// published: max(7d, notify.max_age) (docs/polling.md).
 func (p *Poller) publishWindow() time.Duration {
 	return max(MinPublishWindow, p.Cfg.Notify.MaxAge.D)
 }
 
 // reconcilePending reports whether a reconciled release with a known date is
 // pending rather than skipped: published within the publish window and
-// after the repo was first scanned (§3.1).
+// after the repo was first scanned (docs/polling.md).
 func (p *Poller) reconcilePending(published, initialized time.Time) bool {
 	return published.After(initialized) && p.now().Sub(published) <= p.publishWindow()
 }
 
 // reconcile runs the daily reconciliation of the releases list when due,
-// page by page, resuming at reconcile_next_page (§3.1). It only inserts
+// page by page, resuming at reconcile_next_page (docs/polling.md). It only inserts
 // missing rows and never moves the scan boundary. Tag-only repos need none:
 // their list is read in full on every poll.
 func (p *Poller) reconcile(ctx context.Context, r *config.Repo, b *budget) error {
@@ -930,7 +930,7 @@ func (p *Poller) setReconcilePage(ctx context.Context, repo string, page int) er
 }
 
 // drainMetadata resolves tag dates from the metadata queue, at most
-// MetadataPerTick per tick (§3.1 step 2). Dates are frozen once set.
+// MetadataPerTick per tick (docs/polling.md). Dates are frozen once set.
 func (p *Poller) drainMetadata(ctx context.Context, tick int64, b *budget) error {
 	rows, err := p.Store.UndatedTags(ctx, tick, MetadataPerTick)
 	if err != nil {
@@ -994,7 +994,7 @@ func (p *Poller) drainMetadata(ctx context.Context, tick int64, b *budget) error
 	return nil
 }
 
-// resolveNotes works the notes resolution queue (§3.2): unresolved
+// resolveNotes works the notes resolution queue (docs/notes.md): unresolved
 // pending and fallback rows, then recent no_notes rows due for a recheck,
 // at most ResolvePerTick per tick. A failure leaves the row as it was, to
 // be retried; only a completed resolution can mean "no notes".
@@ -1051,7 +1051,7 @@ func (p *Poller) resolveNotes(ctx context.Context, tick int64, b *budget) error 
 }
 
 // verifySweep runs the rotating existence checks: up to verify_per_tick
-// visible releases, least recently attempted first (§3.1).
+// visible releases, least recently attempted first (docs/public-only.md).
 func (p *Poller) verifySweep(ctx context.Context, tick int64, b *budget) error {
 	rows, err := p.Store.VerifyDue(ctx, tick, p.Cfg.GitHub.VerifyPerTick)
 	if err != nil {
@@ -1075,9 +1075,9 @@ func (p *Poller) verifySweep(ctx context.Context, tick int64, b *budget) error {
 }
 
 // Promote publishes pending releases older than llm.publish_after as
-// fallbacks (§3.3). Each repo must be confirmed this tick and pass a
+// fallbacks (docs/summaries.md). Each repo must be confirmed this tick and pass a
 // just-in-time public check first; one check covers a repo's promotions in
-// this pass (§3.1, processing gate). It returns how many were promoted.
+// this pass (docs/public-only.md#the-processing-gate). It returns how many were promoted.
 func (p *Poller) Promote(ctx context.Context, tick int64) (int, error) {
 	now := p.now()
 	due, err := p.Store.DuePromotions(ctx, now.Add(-p.Cfg.LLM.PublishAfter.D))

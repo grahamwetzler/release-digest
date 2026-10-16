@@ -121,7 +121,7 @@ func reportErrors(err error, stderr io.Writer) int {
 
 func generator() string { return "release-digest/" + version }
 
-// secrets are the loaded credentials (§4.3). Clients read them at request
+// secrets are the loaded credentials (docs/secrets.md). Clients read them at request
 // time, so a SIGHUP reload takes effect on the next request.
 type secrets struct {
 	LLM, GitHub, Ntfy, NtfyURL *secret.Value
@@ -165,7 +165,7 @@ type env struct {
 	outbox  *notify.Outbox
 
 	// guardOK is set once the active GitHub token has passed the token guard
-	// (§3.1). Until then no tick polls GitHub.
+	// (docs/polling.md). Until then no tick polls GitHub.
 	guardOK atomic.Bool
 }
 
@@ -236,7 +236,7 @@ func open(ctx context.Context, cfgPath string, stderr io.Writer) (*env, int) {
 }
 
 // ntfyURL is the ntfy server and topic, from the config or the ntfy url
-// secret (§4.3); "" if alerts are off.
+// secret (docs/secrets.md); "" if alerts are off.
 func (e *env) ntfyURL() string {
 	if n := e.cfg.Notify.Ntfy; n != nil && n.URL != "" {
 		return n.URL
@@ -261,7 +261,7 @@ func checkNtfyURL(cfg *config.Config, l secret.Loaded) error {
 	return nil
 }
 
-// startGuard runs the token guard at startup (§3.1). A token that fails it
+// startGuard runs the token guard at startup (docs/public-only.md). A token that fails it
 // is fatal. If the check can't run (GitHub unreachable), the service starts
 // anyway, and each tick retries the guard before polling.
 func (e *env) startGuard(ctx context.Context) error {

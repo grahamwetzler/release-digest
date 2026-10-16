@@ -1,5 +1,5 @@
 // Package scheduler runs the tick (poll, summarize, render) every
-// schedule.interval plus jitter, one tick at a time (PLAN.md §3).
+// schedule.interval plus jitter, one tick at a time (docs/architecture.md).
 package scheduler
 
 import (

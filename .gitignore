@@ -7,3 +7,4 @@ compose.override.yaml
 !/secrets/.gitignore
 # roborev snapshots
 /.roborev/
+/release-digest.yaml

@@ -18,7 +18,7 @@ services:
       # local Ollama service below instead:
       # RELEASE_DIGEST_LLM_BASE_URL: http://ollama:11434/v1
       # RELEASE_DIGEST_LLM_MODEL: qwen3:8b
-      # No key env vars: both secrets are picked up from /run/secrets/ (PLAN.md §4.3).
+      # No key env vars: both secrets are picked up from /run/secrets/ (docs/secrets.md).
     secrets: [llm_api_key, github_token]
     volumes:
       # A named volume works as is. A bind mount (./data:/data) must be
@@ -28,7 +28,7 @@ services:
       - ./deploy:/config:ro
     expose: ["8080"] # the reverse proxy joins this network; no host port needed
     # Per-host settings (the real public URL, a host port, the ntfy_url and
-    # ntfy_token secrets for security alerts, PLAN.md §3.4) go in an
+    # ntfy_token secrets for security alerts, docs/security-alerts.md) go in an
     # untracked compose.override.yaml, which docker compose merges in
     # automatically.
 

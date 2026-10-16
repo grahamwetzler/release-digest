@@ -1,5 +1,5 @@
 // Package llm is a minimal OpenAI-compatible Chat Completions client
-// (PLAN.md §3.3): structured output with fallbacks for servers that don't
+// (docs/summaries.md): structured output with fallbacks for servers that don't
 // support it, and retries on 429 and 5xx. Errors never carry the API key.
 package llm
 
@@ -45,7 +45,7 @@ type Response struct {
 	TokensOut int
 }
 
-// Response formats, from most to least structured (§3.3). A server that
+// Response formats, from most to least structured (docs/summaries.md). A server that
 // rejects one is asked again with the next.
 const (
 	FormatJSONSchema = iota
@@ -143,7 +143,7 @@ func (c *Client) complete(ctx context.Context, req Request, f int, sent *int) (*
 		resp, wait, err := c.post(ctx, body)
 		if err == nil || try >= Retries || wait < 0 || wait > MaxRetryAfter || ctx.Err() != nil {
 			// A server that asks for a longer wait than MaxRetryAfter fails
-			// the attempt, and the summarize backoff (§3.3) takes over.
+			// the attempt, and the summarize backoff (docs/summaries.md) takes over.
 			return resp, err
 		}
 		backoff := time.Second << try

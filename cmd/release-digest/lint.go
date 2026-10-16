@@ -22,9 +22,9 @@ import (
 )
 
 // cmdConfigLint validates the merged config and the secrets' sources. It
-// reports where each secret comes from, never its value (§4.3). Unless
+// reports where each secret comes from, never its value (docs/secrets.md). Unless
 // --offline, it also checks that every repo is public and reachable with
-// the token, and that the LLM answers a tiny fixed prompt (§4.3).
+// the token, and that the LLM answers a tiny fixed prompt (docs/secrets.md).
 func cmdConfigLint(args []string, stdout, stderr io.Writer) int {
 	fs, cfgPath := newFlags("config lint", stderr)
 	offline := fs.Bool("offline", false, "skip the GitHub and LLM checks")

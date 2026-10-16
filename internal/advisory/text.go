@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Text evidence (§3.4): a line that mentions an advisory counts as fixing it
+// Text evidence (docs/security-alerts.md): a line that mentions an advisory counts as fixing it
 // only in an allowlisted affirmative form and with no negation, hedge or
 // future marker anywhere on it. The rule is deliberately conservative: a
 // false negative only drops this signal, a false positive sends a wrong

@@ -55,7 +55,7 @@ func (es Errors) Error() string {
 // LookupEnv reads one environment variable; os.LookupEnv in production.
 type LookupEnv func(string) (string, bool)
 
-// Load reads the config at path, applies env overrides (§4.1) and validates
+// Load reads the config at path, applies env overrides (docs/configuration.md) and validates
 // it. On failure the error is an Errors listing every problem found.
 func Load(path string, env LookupEnv) (*Config, error) {
 	if env == nil {
@@ -81,7 +81,7 @@ func Load(path string, env LookupEnv) (*Config, error) {
 	return c, nil
 }
 
-// secretKeys may never appear in the YAML file, at any depth (§4.3).
+// secretKeys may never appear in the YAML file, at any depth (docs/secrets.md).
 var secretKeys = map[string]string{
 	"api_key":  "LLM_API_KEY_FILE (or /run/secrets/llm_api_key)",
 	"apikey":   "LLM_API_KEY_FILE (or /run/secrets/llm_api_key)",
@@ -109,7 +109,7 @@ func decodeStrict(path string, v any) (*yaml.Node, Errors) {
 		if hint, bad := secretKeys[strings.ToLower(key.Value)]; bad {
 			secretLines[key.Line] = true
 			errs = append(errs, Error{File: path, Line: key.Line, Path: pathString(keyPath),
-				Msg: "secrets are never read from the config file; use " + hint + " (see PLAN.md §4.3)"})
+				Msg: "secrets are never read from the config file; use " + hint + " (see docs/secrets.md)"})
 		}
 	})
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -316,7 +316,7 @@ func (v *validator) atLeast(path []any, n *int, def, min int) {
 	}
 }
 
-// applyEnv applies the env overrides of §4.1 before validation.
+// applyEnv applies the env overrides (docs/configuration.md) before validation.
 func (v *validator) applyEnv(c *Config, env LookupEnv) {
 	if s, ok := env(EnvPublicBaseURL); ok && s != "" {
 		c.PublicBaseURL = s
@@ -338,7 +338,7 @@ func (v *validator) applyEnv(c *Config, env LookupEnv) {
 // repoName is owner/repo as GitHub allows it.
 var repoName = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$`)
 
-// mergeEnvRepos merges RELEASE_DIGEST_REPOS into the YAML list (§4.1). A
+// mergeEnvRepos merges RELEASE_DIGEST_REPOS into the YAML list (docs/configuration.md). A
 // repo listed in both keeps its YAML options. "+pre" includes pre-releases.
 func (v *validator) mergeEnvRepos(c *Config, list string) {
 	seen := map[string]bool{}
@@ -434,7 +434,7 @@ func (v *validator) validate(c *Config, dir string) {
 	for name := range l.Headers {
 		switch strings.ToLower(name) {
 		case "authorization", "proxy-authorization", "x-api-key", "api-key", "cookie":
-			v.err(p("llm", "headers", name), "carries a credential; set the key with LLM_API_KEY_FILE instead (see PLAN.md §4.3)")
+			v.err(p("llm", "headers", name), "carries a credential; set the key with LLM_API_KEY_FILE instead (see docs/secrets.md)")
 		}
 	}
 	if l.Temperature == nil {
@@ -608,7 +608,7 @@ func (c *Config) Options(name string) RepoOptions {
 	return c.Defaults
 }
 
-// Name is the repo's key: owner/repo, lowercased (§5).
+// Name is the repo's key: owner/repo, lowercased (docs/feed.md).
 func (r *Repo) Name() string { return strings.ToLower(r.Repo) }
 
 func orDefault(s, def string) string {

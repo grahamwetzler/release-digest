@@ -7,14 +7,14 @@ import (
 	"time"
 )
 
-// Summarize backoff (§3.3): a failed attempt waits min(BackoffBase ×
+// Summarize backoff (docs/summaries.md): a failed attempt waits min(BackoffBase ×
 // 2^attempts, BackoffMax) before the next.
 const (
 	BackoffBase = 15 * time.Minute
 	BackoffMax  = 24 * time.Hour
 )
 
-// Summary is a stored LLM summary, keyed by its canonical request (§3.3).
+// Summary is a stored LLM summary, keyed by its canonical request (docs/summaries.md).
 type Summary struct {
 	Key       string
 	Model     string
@@ -53,7 +53,7 @@ func (s ops) PutSummary(ctx context.Context, sum *Summary) error {
 	return err
 }
 
-// RequestResummarize flags the releases that resummarize names (§3.3):
+// RequestResummarize flags the releases that resummarize names (docs/summaries.md):
 // summarized, fallback or pending rows published at or after since, in
 // repo if it isn't "", and not deleted. Each records the request time now
 // and is due at once with its backoff reset. The summarize stage answers
@@ -81,11 +81,11 @@ func (s *Store) RequestResummarize(ctx context.Context, repo string, since, now 
 	return out, err
 }
 
-// DueSummaries returns up to n rows eligible for the summarize pass (§3.3),
+// DueSummaries returns up to n rows eligible for the summarize pass (docs/summaries.md),
 // in repos confirmed in tick: pending or fallback, or summarized and
 // flagged by resummarize, with resolved notes, due by next_attempt_at,
 // dated, and not deleted. Rows whose notes are unresolved wait for
-// resolution (§3.2), so provisional notes are never summarized. Unflagged
+// resolution (docs/notes.md), so provisional notes are never summarized. Unflagged
 // rows come first, so a large resummarize doesn't delay new releases; then
 // oldest first_seen_at first.
 func (s ops) DueSummaries(ctx context.Context, tick int64, now time.Time, n int) ([]*Release, error) {
@@ -108,8 +108,8 @@ func (s ops) DueSummaries(ctx context.Context, tick int64, now time.Time, n int)
 // row's request, so one made during the call is kept for the next pass.
 // The update is atomic
 // with the gate: it applies only while the repo is confirmed for tick and
-// not held (§3.1). The new summary is an urgency input, so the row's
-// urgency is marked for recomputing (§3.4). It reports whether the row
+// not held (docs/public-only.md). The new summary is an urgency input, so the row's
+// urgency is marked for recomputing (docs/security-alerts.md). It reports whether the row
 // changed; it doesn't if the notes changed or the confirmation was lost
 // meanwhile.
 func (s ops) Summarized(ctx context.Context, repo, tag, notesHash, key string, served time.Time, tick int64, at time.Time) (bool, error) {

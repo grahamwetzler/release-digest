@@ -14,7 +14,7 @@ import (
 )
 
 // ProgressEvery is how many completed summaries trigger a render mid-pass,
-// so a long pass publishes as it goes (§3).
+// so a long pass publishes as it goes (docs/architecture.md).
 const ProgressEvery = 5
 
 // Summarizer runs the summarize stage of a tick.
@@ -25,7 +25,7 @@ type Summarizer struct {
 	Log   *slog.Logger
 
 	// Gate is the just-in-time public check before an LLM call or a
-	// publication (§3.1, processing gate). It returns an error only for a
+	// publication (docs/public-only.md#the-processing-gate). It returns an error only for a
 	// store failure; any outcome but public is false.
 	Gate func(ctx context.Context, repo string) (bool, error)
 	// Progress, if set, is called after every ProgressEvery completed
@@ -62,7 +62,7 @@ var ErrNotPublic = errors.New("the repo is no longer confirmed public")
 // invalid reply. It touches neither the store nor the gate: callers check
 // visibility before calling it, and recheck, if set, runs before every
 // later HTTP request: the client's retries and format fallbacks, and the
-// repair request. A call can take minutes (§3.1). A failed recheck returns
+// repair request. A call can take minutes (docs/polling.md). A failed recheck returns
 // ErrNotPublic.
 func (s *Summarizer) Summarize(ctx context.Context, prompt string, in Input, recheck func(context.Context) (bool, error)) (*Result, error) {
 	msgs := Messages(prompt, in)
@@ -108,7 +108,7 @@ func (s *Summarizer) endpoint() Endpoint {
 	return Endpoint{BaseURL: s.LLM.BaseURL, Model: s.LLM.Model, Temperature: s.LLM.Temperature}
 }
 
-// Pass summarizes due releases (§3.3) within summarize_budget: at most
+// Pass summarizes due releases (docs/summaries.md) within summarize_budget: at most
 // llm.max_per_pass, oldest first, llm.concurrency at a time, only in repos
 // confirmed in tick and passing the just-in-time check. The budget is
 // checked before each release starts, so the overrun is at most one call.
@@ -185,7 +185,7 @@ feed:
 // store failure.
 func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *store.Release) (bool, error) {
 	// A failed just-in-time check for another of the repo's releases
-	// invalidates the tick's confirmation (§3.1).
+	// invalidates the tick's confirmation (docs/public-only.md).
 	if ok, err := s.Store.Confirmed(ctx, r.Repo, tick); err != nil || !ok {
 		return false, err
 	}
@@ -243,7 +243,7 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 		}
 	}
 	// Conditional on the repo's confirmation for this tick, atomically: a
-	// concurrent worker's failed check for the same repo stops it (§3.1).
+	// concurrent worker's failed check for the same repo stops it (docs/polling.md).
 	ok, err := s.Store.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, r.Resummarize, tick, s.now())
 	if err == nil && ok {
 		s.Log.Info("summarized", "repo", r.Repo, "tag", r.Tag, "reused", reused, "resummarized", !r.Resummarize.IsZero(), "tokens_in", cached.TokensIn, "tokens_out", cached.TokensOut)

@@ -1,6 +1,6 @@
 // Package advisory finds security advisory IDs in release notes, reads
 // GitHub's global advisories, and decides whether an advisory belongs to a
-// repo and is fixed by a release (PLAN.md §3.4). It does no I/O.
+// repo and is fixed by a release (docs/security-alerts.md). It does no I/O.
 package advisory
 
 import (
@@ -128,7 +128,7 @@ func Parse(data string) ([]Advisory, error) {
 	return out, nil
 }
 
-// Matches reports whether a belongs to repo (§3.4): its
+// Matches reports whether a belongs to repo (docs/security-alerts.md): its
 // source_code_location is the repo's GitHub URL, or one of its packages is
 // one of the repo's configured packages. It returns the vulnerabilities that
 // apply: all of them for a source_code_location match, else those of the
@@ -177,7 +177,7 @@ func sameRepo(loc, repo string) bool {
 	return s == "github.com/"+strings.ToLower(repo)
 }
 
-// VersionEvidence is the outcome of the version check (§3.4).
+// VersionEvidence is the outcome of the version check (docs/security-alerts.md).
 type VersionEvidence int
 
 const (

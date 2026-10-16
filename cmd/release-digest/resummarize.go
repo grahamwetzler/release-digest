@@ -12,7 +12,7 @@ import (
 	"release-digest/internal/store"
 )
 
-// cmdResummarize flags releases for a fresh summary (§3.3). It only marks
+// cmdResummarize flags releases for a fresh summary (docs/summaries.md). It only marks
 // them: the summarize stage of the next tick (run's, or build's) makes the
 // calls, within llm.max_per_pass and the public check like any summary.
 // Each release keeps its current summary until the new one is stored.

@@ -116,7 +116,7 @@ func releases(from, n int, newest time.Time) []githubtest.Release {
 	return out
 }
 
-// body is release notes substantive enough to resolve without requests (§3.2).
+// body is release notes substantive enough to resolve without requests (docs/notes.md).
 const body = "Substantive release notes, long enough to stand alone."
 
 // changelog gives r a default-branch CHANGELOG.md with a section for each of its tags.

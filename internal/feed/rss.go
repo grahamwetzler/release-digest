@@ -1,5 +1,5 @@
 // Package feed renders items as RSS 2.0 and Atom 1.0 and checks feeds. It is
-// ported from feed-me (PLAN.md §3.6).
+// ported from feed-me (docs/feed.md).
 package feed
 
 import (
@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 )
 
-// Namespaces (§7.1).
+// Namespaces.
 const (
 	NSContent = "http://purl.org/rss/1.0/modules/content/"
 	NSAtom    = "http://www.w3.org/2005/Atom"
@@ -31,7 +31,7 @@ type Channel struct {
 	Author      string // feed-level author, required by Atom
 	TTL         int
 	SelfURL     string    // public URL of this feed, for atom:link rel=self
-	LastBuild   time.Time // last content change, not last run (§5.7)
+	LastBuild   time.Time // last content change, not last run
 	Generator   string
 }
 
@@ -48,7 +48,7 @@ type Item struct {
 	Published   time.Time
 	Updated     time.Time
 	Image       string
-	Enclosure   bool // also emit <enclosure> for Image (§6.9)
+	Enclosure   bool // also emit <enclosure> for Image
 }
 
 type rssDoc struct {
@@ -101,7 +101,7 @@ type rssItem struct {
 	Media       *mediaContent `xml:"media:content"`
 }
 
-// cdata is written as <![CDATA[...]]>; encoding/xml splits any "]]>" inside (§6.7).
+// cdata is written as <![CDATA[...]]>; encoding/xml splits any "]]>" inside.
 type cdata struct {
 	Text string `xml:",cdata"`
 }
@@ -122,7 +122,7 @@ type mediaContent struct {
 	Medium string `xml:"medium,attr"`
 }
 
-// RSSDate formats a time for RSS: RFC 822 with a 4-digit year, in UTC (§5.6).
+// RSSDate formats a time for RSS: RFC 822 with a 4-digit year, in UTC.
 func RSSDate(t time.Time) string { return t.UTC().Format(time.RFC1123Z) }
 
 // RSS renders an RSS 2.0 document. Items are written in the order given.
@@ -202,7 +202,7 @@ func imageType(u string) string {
 	return "image/jpeg"
 }
 
-// clean removes characters XML 1.0 does not allow (§6.7): control characters
+// clean removes characters XML 1.0 does not allow: control characters
 // other than tab, newline and carriage return, surrogates, U+FFFE/U+FFFF and
 // invalid UTF-8.
 func clean(s string) string {

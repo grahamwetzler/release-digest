@@ -1,5 +1,5 @@
 // Package render builds the combined feed from the store and publishes it
-// as RSS and Atom bytes (PLAN.md §3.6, §6).
+// as RSS and Atom bytes (docs/feed.md).
 package render
 
 import (
@@ -50,15 +50,15 @@ func Channel(c *config.Config, f Format, generator string) feed.Channel {
 	}
 }
 
-// ExcerptChars is how much of the notes a fallback item shows (§3.3).
+// ExcerptChars is how much of the notes a fallback item shows (docs/summaries.md).
 const ExcerptChars = 600
 
-// Item turns a stored release into a feed item (§6). notes is the
+// Item turns a stored release into a feed item (docs/feed.md). notes is the
 // release's notes text, if any, and sum its summary if it is summarized. A
 // summarized item shows the summary; a fallback shows an excerpt of the
-// notes; a no_notes item says there are none (§3.2, §3.3). A summarized
+// notes; a no_notes item says there are none (docs/notes.md, docs/summaries.md). A summarized
 // row whose summary can't be read is shown as a fallback. An urgent
-// security release is marked whatever its state (§3.4).
+// security release is marked whatever its state (docs/security-alerts.md).
 func Item(r *store.Release, notes string, sum *store.Summary) feed.Item {
 	it := item(r, notes, sum)
 	if r.Urgency == store.UrgencyUrgent {
@@ -124,7 +124,7 @@ func item(r *store.Release, notes string, sum *store.Summary) feed.Item {
 	}
 }
 
-// sections are a summary's lists, in the order shown (§6).
+// sections are a summary's lists, in the order shown (docs/feed.md).
 var sections = []struct {
 	title string
 	items func(*summarize.Summary) []string
@@ -135,7 +135,7 @@ var sections = []struct {
 	{"Security", func(s *summarize.Summary) []string { return s.Security }},
 }
 
-// summarized is the item for a summarized release (§6): the headline in the
+// summarized is the item for a summarized release (docs/feed.md): the headline in the
 // title, the lists as sections, the links, and a footer naming the model
 // and the notes source. A noise-only release is the headline alone.
 func summarized(r *store.Release, title string, cats []string, s *summarize.Summary, model string) feed.Item {
@@ -193,7 +193,7 @@ func summarized(r *store.Release, title string, cats []string, s *summarize.Summ
 	}
 }
 
-// sourceNames name each notes source for readers (§6).
+// sourceNames name each notes source for readers (docs/feed.md).
 var sourceNames = map[string]string{
 	"release_body": "the release notes",
 	"changelog":    "the changelog",

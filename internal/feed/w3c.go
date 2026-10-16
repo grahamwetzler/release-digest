@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// W3CEndpoint is the W3C Feed Validation Service (§7.3).
+// W3CEndpoint is the W3C Feed Validation Service.
 const W3CEndpoint = "https://validator.w3.org/feed/check.cgi"
 
 // W3CMessage is one error or warning from the validator.

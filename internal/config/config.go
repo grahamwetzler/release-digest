@@ -1,11 +1,11 @@
 // Package config loads release-digest.yaml, applies env overrides and the
-// RELEASE_DIGEST_REPOS list, and validates the result (PLAN.md §4).
+// RELEASE_DIGEST_REPOS list, and validates the result (docs/configuration.md).
 package config
 
 import "time"
 
-// Config is release-digest.yaml (§4.2). Relative paths resolve against the
-// file's directory. Secrets are never read from it (§4.3).
+// Config is release-digest.yaml (docs/configuration.md). Relative paths resolve against the
+// file's directory. Secrets are never read from it (docs/secrets.md).
 type Config struct {
 	Version       int         `yaml:"version"`
 	StorePath     string      `yaml:"store_path"`
@@ -71,7 +71,7 @@ type Notify struct {
 }
 
 type Ntfy struct {
-	URL string `yaml:"url"` // server + topic; may instead come from NTFY_URL_FILE (§4.3)
+	URL string `yaml:"url"` // server + topic; may instead come from NTFY_URL_FILE (docs/secrets.md)
 }
 
 // RepoOptions are the per-repo settings. In defaults every field is set
@@ -87,11 +87,11 @@ type RepoOptions struct {
 	PrereleasePattern  *Regex    `yaml:"prerelease_pattern"`
 	Packages           []Package `yaml:"packages"`
 	// Instructions tell the LLM what matters to you in this repo's
-	// releases (§3.3). A repo's own value, even "", replaces the default's.
+	// releases (docs/summaries.md). A repo's own value, even "", replaces the default's.
 	Instructions *string `yaml:"instructions"`
 }
 
-// Package names a published package for advisory matching (§3.4).
+// Package names a published package for advisory matching (docs/security-alerts.md).
 type Package struct {
 	Ecosystem string `yaml:"ecosystem"`
 	Name      string `yaml:"name"`
@@ -108,7 +108,7 @@ type Repo struct {
 	invalid bool // a null entry, already reported; skipped by validation
 }
 
-// Defaults (§4.2).
+// Defaults (docs/configuration.md).
 const (
 	DefaultStorePath       = "release-digest.db"
 	DefaultListen          = ":8080"
@@ -143,7 +143,7 @@ var (
 	DefaultSources         = []string{"releases", "tags"}
 )
 
-// Env vars (§4.1).
+// Env vars (docs/configuration.md).
 const (
 	EnvConfig           = "RELEASE_DIGEST_CONFIG"
 	EnvRepos            = "RELEASE_DIGEST_REPOS"

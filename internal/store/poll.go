@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Release origins (§3.1).
+// Release origins (docs/polling.md).
 const (
 	OriginLive      = "live"
 	OriginBackfill  = "backfill"
@@ -18,12 +18,12 @@ const (
 	OriginReconcile = "reconcile"
 )
 
-// visibleStates are the states shown in the feed (§3.3).
+// visibleStates are the states shown in the feed (docs/summaries.md).
 var visibleStates = []any{StateFallback, StateSummarized, StateNoNotes}
 
 const visibleIn = `state IN (?, ?, ?)`
 
-// RepoState is one repo's poll bookkeeping (§8.1). Zero times and "" mean unset.
+// RepoState is one repo's poll bookkeeping (docs/architecture.md). Zero times and "" mean unset.
 type RepoState struct {
 	Repo              string
 	InitializedAt     time.Time
@@ -76,7 +76,7 @@ func (s ops) PutRepoState(ctx context.Context, rs *RepoState) error {
 	return err
 }
 
-// Visibility records the outcome of a public check (§3.1 step 0). A public
+// Visibility records the outcome of a public check (docs/public-only.md). A public
 // repo is confirmed for tick and un-held. Any other outcome clears the
 // confirmation; private or not found (gone) also holds the repo.
 func (s ops) Visibility(ctx context.Context, repo string, tick int64, public, gone bool, at time.Time, errText string) error {
@@ -99,7 +99,7 @@ func (s ops) Visibility(ctx context.Context, repo string, tick int64, public, go
 }
 
 // Confirmed reports whether the repo passed its public check in tick and is
-// not held: the scheduler half of the processing gate (§3.1).
+// not held: the scheduler half of the processing gate (docs/public-only.md).
 func (s ops) Confirmed(ctx context.Context, repo string, tick int64) (bool, error) {
 	rs, err := s.RepoState(ctx, repo)
 	if err != nil {
@@ -134,7 +134,7 @@ func (s ops) RepoTags(ctx context.Context, repo string) (map[string]bool, error)
 }
 
 // StreamReleases returns every stored row of the repo in the stream, any
-// state, for predecessor selection (§3.2.1).
+// state, for predecessor selection (docs/versions.md).
 func (s ops) StreamReleases(ctx context.Context, repo, stream string) ([]*Release, error) {
 	rows, err := s.q.QueryContext(ctx, `SELECT `+releaseColumns+` FROM releases WHERE repo = ? AND stream = ?`, repo, stream)
 	if err != nil {
@@ -150,7 +150,7 @@ func (s ops) SetPrevTag(ctx context.Context, repo, tag, prev string) error {
 }
 
 // Seen records that tags appeared in a list response, which clears any
-// missing_since (§3.1, deletion detection) and marks the urgency for
+// missing_since (docs/polling.md#deletion-detection) and marks the urgency for
 // recomputing.
 func (s ops) Seen(ctx context.Context, repo string, tags []string) error {
 	for _, tag := range tags {
@@ -199,7 +199,7 @@ func (s ops) Notes(ctx context.Context, hash string) (string, error) {
 // on a row whose notes may still change: pending, fallback or no_notes.
 // The row's notes go back to unresolved; a pending row, which isn't
 // visible, also takes src and hash as provisional notes. Visible rows keep
-// their content until resolution (§3.3). It reports whether the body changed.
+// their content until resolution (docs/summaries.md). It reports whether the body changed.
 func (s ops) SetBody(ctx context.Context, repo, tag, bodyHash, src, hash string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE releases SET body_hash = ?1, notes_resolved = 0, resolve_attempted_at = NULL,
 			notes_source = CASE WHEN state = ?4 THEN ?2 ELSE notes_source END,
@@ -213,7 +213,7 @@ func (s ops) SetBody(ctx context.Context, repo, tag, bodyHash, src, hash string)
 	return n > 0, err
 }
 
-// ResolveNotes records resolved notes (§3.2, §3.3). With notes (src set), a
+// ResolveNotes records resolved notes (docs/notes.md, docs/summaries.md). With notes (src set), a
 // no_notes row returns to fallback; without (src ""), a fallback row becomes
 // no_notes. A visible row whose content changes gets content_updated_at, and
 // a row with new notes is due for summarizing at once.
@@ -244,7 +244,7 @@ func (s ops) ResolveAttempted(ctx context.Context, repo, tag string, at time.Tim
 }
 
 // UnresolvedNotes returns up to n rows due for notes resolution in repos
-// confirmed in tick (§3.2): dated pending, fallback and no_notes rows whose
+// confirmed in tick (docs/notes.md): dated pending, fallback and no_notes rows whose
 // notes aren't resolved (a body edit unresolves them), whatever their age;
 // then resolved no_notes rows published since recent and not tried since
 // retry, which are rechecked in case notes appeared. Within each group,
@@ -264,7 +264,7 @@ func (s ops) UnresolvedNotes(ctx context.Context, tick int64, n int, recent, ret
 }
 
 // UndatedTags returns up to n tag rows whose commit date is unknown, in
-// repos confirmed in tick: the metadata queue (§3.1 step 2). Rows never
+// repos confirmed in tick: the metadata queue (docs/public-only.md). Rows never
 // attempted come first, then the least recently attempted, so lookups that
 // keep failing rotate to the back. Skipped rows with a parsed version are
 // never dated: nothing shows them, and SemVer predecessors don't need dates.
@@ -287,7 +287,7 @@ func (s ops) MetaAttempted(ctx context.Context, repo, tag string, at time.Time) 
 }
 
 // SetPublished sets a release's date if it is still unknown; once set it is
-// frozen (§5).
+// frozen (docs/feed.md).
 func (s ops) SetPublished(ctx context.Context, repo, tag string, at time.Time) error {
 	_, err := s.q.ExecContext(ctx, `UPDATE releases SET published_at = ? WHERE repo = ? AND tag = ? AND published_at IS NULL`,
 		toMS(at), repo, tag)
@@ -295,7 +295,7 @@ func (s ops) SetPublished(ctx context.Context, repo, tag string, at time.Time) e
 }
 
 // Skip moves a pending row to skipped, for a reconciled tag whose date turned
-// out to be outside the publish window (§3.1).
+// out to be outside the publish window (docs/polling.md).
 func (s ops) Skip(ctx context.Context, repo, tag string) error {
 	_, err := s.q.ExecContext(ctx, `UPDATE releases SET state = ? WHERE repo = ? AND tag = ? AND state = ?`,
 		StateSkipped, repo, tag, StatePending)
@@ -303,7 +303,7 @@ func (s ops) Skip(ctx context.Context, repo, tag string) error {
 }
 
 // VerifyDue returns up to n visible releases in repos confirmed in tick,
-// least recently attempted first: the rotating deletion sweep (§3.1).
+// least recently attempted first: the rotating deletion sweep (docs/polling.md).
 func (s ops) VerifyDue(ctx context.Context, tick int64, n int) ([]*Release, error) {
 	rows, err := s.q.QueryContext(ctx, `SELECT `+prefixed("r.")+` FROM releases r
 		JOIN repo_state rs ON rs.repo = r.repo AND rs.visibility_confirmed_tick = ? AND rs.held = 0
@@ -316,7 +316,7 @@ func (s ops) VerifyDue(ctx context.Context, tick int64, n int) ([]*Release, erro
 	return scanReleases(rows)
 }
 
-// Existence-check outcomes (§3.1).
+// Existence-check outcomes (docs/polling.md).
 const (
 	VerifyFound = iota
 	VerifyNotFound
@@ -326,7 +326,7 @@ const (
 // RecordVerify records an existence check. Found clears missing_since; not
 // found sets it (keeping an earlier time); a failure only records the attempt.
 // A change of missing_since marks the urgency for recomputing: a deleted
-// release never alerts (§3.4).
+// release never alerts (docs/security-alerts.md).
 func (s ops) RecordVerify(ctx context.Context, repo, tag string, outcome int, at time.Time) error {
 	var q string
 	switch outcome {
@@ -344,7 +344,7 @@ func (s ops) RecordVerify(ctx context.Context, repo, tag string, outcome int, at
 }
 
 // DuePromotions returns pending rows with a known date that are due to be
-// published (§3.3): first seen at or before cutoff, or resolved to no
+// published (docs/summaries.md): first seen at or before cutoff, or resolved to no
 // notes, which has nothing to wait for.
 func (s ops) DuePromotions(ctx context.Context, cutoff time.Time) ([]*Release, error) {
 	rows, err := s.q.QueryContext(ctx, `SELECT `+releaseColumns+` FROM releases

@@ -1,5 +1,5 @@
 // Package notify decides which releases are urgent security releases and
-// alerts them through ntfy (PLAN.md §3.4): the urgency decision, the alert
+// alerts them through ntfy (docs/security-alerts.md): the urgency decision, the alert
 // stage of a tick, the ntfy client and the outbox worker that delivers.
 package notify
 
@@ -44,7 +44,7 @@ type Decision struct {
 	Links    []LinkResult
 	LLM      string // the summary's urgency after the keyword check; "" without a summary
 	// Downgraded is set when the LLM said urgent but the summary lists no
-	// security change or the notes have no security keyword (§3.4).
+	// security change or the notes have no security keyword (docs/security-alerts.md).
 	Downgraded bool
 }
 
@@ -64,7 +64,7 @@ func (d *Decision) Firing() []LinkResult {
 var securityKeyword = regexp.MustCompile(`(?i)security|vulnerab|CVE-|GHSA-|exploit`)
 
 // Decide computes a release's urgency as the maximum of the advisory
-// signal and the LLM signal (§3.4).
+// signal and the LLM signal (docs/security-alerts.md).
 func Decide(in Inputs) Decision {
 	d := Decision{Urgency: store.UrgencyNone}
 	r := in.Release

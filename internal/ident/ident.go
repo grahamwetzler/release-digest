@@ -1,4 +1,4 @@
-// Package ident derives stable item identifiers (PLAN.md §5).
+// Package ident derives stable item identifiers (docs/feed.md).
 package ident
 
 import (

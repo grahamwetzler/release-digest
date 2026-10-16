@@ -1,6 +1,6 @@
 // Package github is the REST client for public repos: visibility checks,
 // releases, tags, commit dates, existence checks, file contents and
-// comparisons, with an ETag cache and rate-limit pacing (PLAN.md §3.1, §3.2).
+// comparisons, with an ETag cache and rate-limit pacing (docs/polling.md, docs/notes.md).
 package github
 
 import (
@@ -24,7 +24,7 @@ import (
 const PerPage = 30
 
 // MaxWait is the longest the client waits for a rate limit to reset; a
-// longer wait fails with a RateLimitError instead (§3.1).
+// longer wait fails with a RateLimitError instead (docs/polling.md).
 const MaxWait = 2 * time.Minute
 
 const maxBody = 16 << 20
@@ -325,7 +325,7 @@ type Visibility struct {
 	Gone   bool // private, or a 404 (a repo gone private looks like one)
 }
 
-// CheckPublic runs the public check (§3.1 step 0). Only an explicit
+// CheckPublic runs the public check (docs/public-only.md). Only an explicit
 // private: false (with a public visibility, where reported) is public.
 // A 404 is Gone, not an error. Any error means "not confirmed".
 func (c *Client) CheckPublic(ctx context.Context, repo string, timeout time.Duration) (Visibility, error) {
@@ -377,7 +377,7 @@ func (c *Client) ReleaseByTag(ctx context.Context, repo, tag string) (*Release, 
 }
 
 // Advisories looks an advisory up in GitHub's global advisory database
-// (§3.4): GET /advisories/{ghsa} for a GHSA ID, or /advisories?cve_id= for
+// (docs/security-alerts.md): GET /advisories/{ghsa} for a GHSA ID, or /advisories?cve_id= for
 // a CVE ID. It returns the advisories as a JSON array, the form they are
 // stored in; none found is ErrNotFound. The lookup names only the ID, never
 // a repo.
@@ -409,7 +409,7 @@ type TagRef struct {
 
 // TagRefs returns every tag of the repo in one request. Unlike the tags
 // list, which is sorted by name and paginated, this is complete, so new and
-// deleted tags can be found without depending on order (§3.1).
+// deleted tags can be found without depending on order (docs/polling.md).
 func (c *Client) TagRefs(ctx context.Context, repo string) ([]TagRef, error) {
 	var refs []struct {
 		Ref    string `json:"ref"`
@@ -465,7 +465,7 @@ func (c *Client) TagDate(ctx context.Context, repo, sha, refType string) (time.T
 	return v.Commit.Committer.Date, nil
 }
 
-// Exists runs a direct existence check (§3.1, deletion detection): the
+// Exists runs a direct existence check (docs/polling.md#deletion-detection): the
 // release by tag, or for kind "tag" the tag ref. A 404 is (false, nil).
 func (c *Client) Exists(ctx context.Context, repo, kind, tag string) (bool, error) {
 	p := repoPath(repo) + "/releases/tags/" + refPath(tag)
@@ -544,7 +544,7 @@ type Commit struct {
 	Parents    int
 }
 
-// Compare compares base...head (§3.2, compare fallback).
+// Compare compares base...head (docs/notes.md#commit-log-fallback).
 func (c *Client) Compare(ctx context.Context, repo, base, head string) (*Comparison, error) {
 	var v struct {
 		Status       string `json:"status"`
@@ -583,12 +583,12 @@ func (c *Client) Compare(ctx context.Context, repo, base, head string) (*Compari
 }
 
 // GuardError is a token that fails the token guard: it can obviously read
-// private repos (§3.1).
+// private repos (docs/public-only.md).
 type GuardError struct{ Reason string }
 
 func (e *GuardError) Error() string { return "github token rejected: " + e.Reason }
 
-// Guard runs the best-effort token guard on token (§3.1). A *GuardError is a
+// Guard runs the best-effort token guard on token (docs/public-only.md). A *GuardError is a
 // definite failure; any other error means the check couldn't run. A zero
 // token passes: unauthenticated requests can't read private repos.
 func (c *Client) Guard(ctx context.Context, token secret.String) error {

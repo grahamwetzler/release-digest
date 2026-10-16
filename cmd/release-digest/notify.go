@@ -23,7 +23,7 @@ import (
 	"release-digest/internal/summarize"
 )
 
-// cmdNotify is "notify test" and "notify ack" (§3.4).
+// cmdNotify is "notify test" and "notify ack" (docs/security-alerts.md).
 func cmdNotify(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -180,7 +180,7 @@ func detect(ctx context.Context, cfg *config.Config, loaded []secret.Loaded, tar
 			vis, err := gh.CheckPublic(ctx, repo, 0)
 			return vis.Public, err
 		}
-		// Resolving took several requests: check again before the notes go out (§3.1).
+		// Resolving took several requests: check again before the notes go out (docs/polling.md).
 		if public, err := recheck(ctx); err != nil || !public {
 			fmt.Fprintf(stderr, "release-digest: %s is no longer confirmed public; nothing was sent to the LLM (%v)\n", repo, err)
 			return 1

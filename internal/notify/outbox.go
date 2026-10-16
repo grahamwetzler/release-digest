@@ -10,7 +10,7 @@ import (
 	"release-digest/internal/store"
 )
 
-// Outbox delivery (§3.4).
+// Outbox delivery (docs/security-alerts.md).
 const (
 	WakeInterval = 30 * time.Second
 	PerWake      = 10
@@ -21,7 +21,7 @@ const (
 )
 
 // Outbox is the worker that delivers queued alerts, independently of the
-// scheduler's ticks (§3.4). Delivery is at-least-once: a row is marked sent
+// scheduler's ticks (docs/security-alerts.md). Delivery is at-least-once: a row is marked sent
 // only after a 2xx, so a POST whose response is lost is sent again.
 type Outbox struct {
 	Store *store.Store
@@ -53,7 +53,7 @@ func (o *Outbox) Kick() {
 	}
 }
 
-// Recover returns rows left sending by a crash to queued (§3.4). Call it
+// Recover returns rows left sending by a crash to queued (docs/security-alerts.md). Call it
 // before Run starts and before anything can Kick.
 func (o *Outbox) Recover(ctx context.Context) error {
 	o.kick = make(chan struct{}, 1)
@@ -108,7 +108,7 @@ func (o *Outbox) Drain(ctx context.Context) error {
 	return nil
 }
 
-// deliver runs one claimed alert to exactly one final state (§3.4).
+// deliver runs one claimed alert to exactly one final state (docs/security-alerts.md).
 func (o *Outbox) deliver(ctx context.Context, n *store.Notification) error {
 	// The outcome is recorded even if shutdown cancels the attempt.
 	rec := context.WithoutCancel(ctx)
@@ -182,7 +182,7 @@ func (o *Outbox) finish(ctx context.Context, n *store.Notification, sendErr erro
 	return nil
 }
 
-// retryAt is when a failed attempt is retried (§3.4): RetryBase doubling
+// retryAt is when a failed attempt is retried (docs/security-alerts.md): RetryBase doubling
 // to RetryMax, but never past a final attempt FinalAttempt before expiry.
 // After the final attempt it is the expiry itself, when the alert expires.
 func (o *Outbox) retryAt(n *store.Notification, now time.Time) time.Time {

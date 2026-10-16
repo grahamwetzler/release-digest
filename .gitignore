@@ -3,8 +3,7 @@
 *.db-*
 /out/
 compose.override.yaml
-/secrets/*
-!/secrets/.gitignore
+/secrets/
 # roborev snapshots
 /.roborev/
 /release-digest.yaml

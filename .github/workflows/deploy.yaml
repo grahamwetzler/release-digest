@@ -26,10 +26,13 @@ jobs:
       - run: go test ./...
       - run: make lint
 
-  # Builds on every PR; pushes to ghcr.io only from main and version tags.
+  # Builds on every run; pushes to ghcr.io only from main and version tags,
+  # so a PR or a manual run on another branch builds without publishing.
   image:
     needs: test
     runs-on: ubuntu-latest
+    env:
+      PUBLISH: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
     permissions:
       contents: read
       packages: write
@@ -52,7 +55,7 @@ jobs:
             type=sha
             type=ref,event=pr
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -64,6 +67,6 @@ jobs:
           build-args: VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ env.PUBLISH == 'true' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

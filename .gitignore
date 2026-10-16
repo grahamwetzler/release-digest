@@ -3,6 +3,7 @@
 *.db-*
 /out/
 compose.override.yaml
+/config/
 /secrets/
 # roborev snapshots
 /.roborev/

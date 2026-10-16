@@ -9,9 +9,11 @@ code is in [`internal/config`](../internal/config).
 1. The file path comes from `--config`, else `RELEASE_DIGEST_CONFIG`, else
    `release-digest.yaml` in the working directory. The image sets
    `RELEASE_DIGEST_CONFIG=/config/release-digest.yaml`, a minimal file that
-   only sets `store_path: /data/release-digest.db`. Mount your own file over
-   it for anything else; `release-digest.example.yaml` is a starting point.
-   Relative paths in the file resolve against its directory.
+   only sets `store_path: /data/release-digest.db`. For anything else, mount
+   a directory holding your own `release-digest.yaml` at `/config`;
+   `release-digest.example.yaml` is a starting point. Relative paths in the
+   file resolve against its directory, which is why compose mounts a
+   directory rather than the file alone.
 2. A few global settings can be overridden from the environment:
 
    | Setting | Env var |

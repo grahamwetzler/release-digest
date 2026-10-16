@@ -14,10 +14,11 @@ services:
       RELEASE_DIGEST_REPOS: |
         anthropics/anthropic-sdk-go
         astral-sh/uv
-      # The LLM defaults to OpenRouter. For the
-      # local Ollama service below instead:
+      # The LLM defaults to OpenRouter; without a model, the feed shows
+      # excerpts only. For the local Ollama service below instead, use
+      # http://ollama:11434/v1 and qwen3:8b.
+      RELEASE_DIGEST_LLM_MODEL: anthropic/claude-haiku-5.5   # any OpenRouter slug
       # RELEASE_DIGEST_LLM_BASE_URL: http://ollama:11434/v1
-      # RELEASE_DIGEST_LLM_MODEL: qwen3:8b
       # No key env vars: both secrets are picked up from /run/secrets/ (docs/secrets.md).
     secrets: [llm_api_key, github_token]
     volumes:

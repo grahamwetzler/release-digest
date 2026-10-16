@@ -53,8 +53,12 @@ documented in [docs/](docs/README.md).
    services:
      release-digest:
        ports: ["127.0.0.1:8080:8080"]
-       volumes: ["./config.yaml:/config/release-digest.yaml:ro"]   # optional
+       volumes: ["./config:/config:ro"]   # optional: config/release-digest.yaml
    ```
+
+   Mount a directory, not the file alone. Files the config refers to, such as
+   `llm.prompt_file`, are found beside it, and an editor that saves by
+   renaming can leave a single-file mount empty, even after a restart.
 
 3. **Check and start it:**
 
@@ -108,9 +112,10 @@ which format the server accepted.
 ## Configuration
 
 The config is YAML, read from `--config` or `RELEASE_DIGEST_CONFIG`. The
-image has a minimal one at `/config/release-digest.yaml`; mount your own file
-there to change it. [release-digest.example.yaml](release-digest.example.yaml)
-is a starting point. A few settings can also come from the environment:
+image has a minimal one at `/config/release-digest.yaml`; to change it, mount
+a directory holding your own `release-digest.yaml` at `/config`.
+[release-digest.example.yaml](release-digest.example.yaml) is a starting
+point. A few settings can also come from the environment:
 
 | Setting | Env var |
 |---|---|

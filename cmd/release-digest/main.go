@@ -38,11 +38,14 @@ Usage:
   release-digest build               one pass, then exit
   release-digest summarize owner/repo@tag
                                      dry run: resolve notes, call the LLM, print the result; writes nothing
+  release-digest resummarize [--repo owner/repo] [--since 30d|all]
+                                     queue a fresh summary of recent releases for the next tick
   release-digest notify test [--release owner/repo@tag]
                                      send a test alert; with --release, print the alert decision for a release instead
   release-digest notify ack          acknowledge expired alerts (clears /healthz's degraded state)
   release-digest validate [--w3c]    check the stored feed (optionally with the W3C validator)
-  release-digest config lint         validate the config and secrets; exits non-zero on error
+  release-digest config lint [--offline]
+                                     validate the config and secrets, and check GitHub and the LLM; exits non-zero on error
   release-digest healthcheck         probe /healthz (for Docker HEALTHCHECK)
   release-digest version
 
@@ -62,7 +65,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "config":
 		if len(args) == 0 || args[0] != "lint" {
-			fmt.Fprintln(stderr, "usage: release-digest config lint")
+			fmt.Fprintln(stderr, "usage: release-digest config lint [--offline]")
 			return 2
 		}
 		return cmdConfigLint(args[1:], stdout, stderr)
@@ -72,6 +75,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSummarize(args, stdout, stderr)
 	case "notify":
 		return cmdNotify(args, stdout, stderr)
+	case "resummarize":
+		return cmdResummarize(args, stdout, stderr)
 	case "validate":
 		return cmdValidate(args, stdout, stderr)
 	case "run":

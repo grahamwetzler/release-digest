@@ -14,6 +14,10 @@ services:
       RELEASE_DIGEST_REPOS: |
         anthropics/anthropic-sdk-go
         astral-sh/uv
+      # The LLM defaults to OpenRouter (deploy/release-digest.yaml). For the
+      # local Ollama service below instead:
+      # RELEASE_DIGEST_LLM_BASE_URL: http://ollama:11434/v1
+      # RELEASE_DIGEST_LLM_MODEL: qwen3:8b
       # No key env vars: both secrets are picked up from /run/secrets/ (PLAN.md §4.3).
     secrets: [llm_api_key, github_token]
     volumes:
@@ -28,7 +32,8 @@ services:
     # untracked compose.override.yaml, which docker compose merges in
     # automatically.
 
-  ollama: # optional local LLM: docker compose --profile ollama up
+  ollama: # optional local LLM: docker compose --profile ollama up -d
+    # then once: docker compose exec ollama ollama pull qwen3:8b
     profiles: [ollama]
     image: ollama/ollama:0.12.6
     volumes: [ollama:/root/.ollama]

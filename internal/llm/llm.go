@@ -107,6 +107,12 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 	}
 }
 
+// Format names the most structured response format the server has
+// accepted so far: json_schema, json_object or prompt.
+func (c *Client) Format() string {
+	return [...]string{"json_schema", "json_object", "prompt"}[c.format.Load()]
+}
+
 // formatRejected reports whether an error answer is a rejection of the
 // response format rather than of the request as a whole. Servers say so in
 // different ways; a 400 or 422 that mentions it is taken as one.

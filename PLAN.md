@@ -234,7 +234,7 @@ The resolved text is stored once in `notes`, keyed by its SHA-256, and the relea
 | `skipped` | no | no | terminal: backfill, filter or catch-up overflow |
 | `pending` | no | yes, when `next_attempt_at ≤ now`. Rows are inserted with `next_attempt_at = first_seen_at`, and the column is `NOT NULL`, so a new release is eligible immediately | → `summarized` on success; → `fallback` at render time once `now − first_seen_at ≥ llm.publish_after` (default 6h); → `no_notes` at render time once notes resolve to none |
 | `fallback` | yes, excerpt | yes, when `next_attempt_at ≤ now` (no age cutoff) | → `summarized` on success; content updates, identity doesn't. → `no_notes` when resolution (§3.2) completes and finds no usable notes. This happens when render promoted the item before resolution had finished. A *transient* resolution failure (an error, a rate limit) is not "no notes": the item stays `fallback` and retries |
-| `summarized` | yes | no | → re-summarized only by `resummarize` |
+| `summarized` | yes | only when flagged by `resummarize` | → re-summarized only by `resummarize` (below) |
 | `no_notes` | yes, deterministic | no | → `fallback` when a later poll finds notes (the release body was edited or a changelog section appeared). It stays in the feed and becomes eligible immediately |
 
 **Rules:**
@@ -242,6 +242,7 @@ The resolved text is stored once in `notes`, keyed by its SHA-256, and the relea
 - **Visible states.** `fallback`, `summarized` and `no_notes` are all visible. Every transition between them keeps the item in the feed and sets `content_updated_at`.
 - **No age cutoff.** `fallback` items have none, because the backoff cap already limits a long LLM outage to at most one attempt per item per day. When the LLM comes back, every fallback is upgraded, oldest first, within the `max_per_pass` limit.
 - **Fallback content.** A fallback item shows the first ~600 chars of the notes as plain text, plus a note that the summary is pending.
+- **Resummarize.** `release-digest resummarize [--repo r] [--since 30d|all]` records the request time in `resummarize` on the matching `summarized`, `fallback` and `pending` rows that are dated and not deleted. It also resets their backoff, so they're due at once. It only marks them; the CLI makes no calls and needs neither GitHub nor the LLM. The summarize stage then takes flagged rows like any other, after the unflagged ones, so a large resummarize doesn't delay new releases. The gate, budgets and `max_per_pass` still apply. Only a summary created after the request satisfies it. An older cached summary is ignored, the row gets a fresh call, and the answer replaces the cached one under the same key. A fresh summary whose publication was gated (§3.1) is newer than the request, so it's published later without a second call. A `summarized` row keeps its current summary and stays in the feed until the new one is published. Publishing clears the request only if it was made before the summary was created, so a request that arrives during a pass isn't lost. A failure keeps the request and backs off as usual. The new summary marks the urgency dirty like any other, and the outbox's once-per-GUID key means it never re-sends an alert.
 - **Milestone 2.** Milestone 2 (§10) publishes through this same `fallback` path. Items from before LLM support, however old, are upgraded automatically once milestone 4 lands, with no migration.
 
 ### 3.4 Urgent security alerts (ntfy)
@@ -480,7 +481,7 @@ Rules:
 - **Not in YAML:** the config loader rejects `api_key` / `token` keys in the YAML with a message pointing to §4.3, so a key can't end up committed to `deploy/`.
 - **Permissions:** compose file-based secrets are bind mounts that keep the host file's owner and mode. The container runs as distroless `nonroot` (uid 65532), so the host file must be readable by that uid. Either `chown 65532 secrets/*` with mode `0400`, or mode `0444` inside a `0700` directory owned by you. `config lint` reports an unreadable secret file with that hint. Swarm secrets can set `uid: "65532"` and `mode: 0400` directly.
 
-`release-digest config lint` validates the merged config: it checks that repos exist and are reachable with the token, that regexes compile, and that the LLM endpoint answers a tiny test prompt.
+`release-digest config lint` validates the merged config, including that regexes compile, and reports each secret's source. It then runs the token guard and the public check on every repo, failing on one that's private or missing. Finally it sends the LLM a tiny fixed structured request, which contains no release data, and reports which response format the server accepted. `--offline` skips the GitHub and LLM checks, which is what `make lint` runs.
 
 ---
 
@@ -489,6 +490,7 @@ Rules:
 - **GUID:** a UUIDv5 of `{owner}/{repo}@{tag}`, with the repo lowercased and the tag exact. It uses a fixed namespace UUID compiled into the binary. RSS emits it with `isPermaLink="false"`, and Atom emits `urn:uuid:{uuid}`. It is stable across renames of the release title, and it's exactly the shape feed-me's `feed.AtomID` already produces (`feed-me/internal/feed/atom.go:65`), so the renderer ports unchanged. A UUID can't come out malformed whatever characters a tag contains (`/`, `+`, unicode). The golden-feed tests include such tags.
 - **pubDate:** the release's `published_at`, or for tag-only repos the tagger date of an annotated tag or the commit's committer date of a lightweight one. Once stored, it is frozen (feed-me §5). A release that's deleted and re-created with the same tag keeps its original item.
 - **Updated time:** `content_updated_at` is set when an item first becomes visible, and advanced on every content change (§1, §3.3). It's passed to the renderer as `Item.Updated`, so Atom `<updated>` moves while `<published>` and the ID stay fixed, and readers that honor updates re-show the upgraded entry. RSS 2.0 has no per-item updated element. The new `<description>` is enough for readers that diff content.
+- **Feed updated time:** the feed's own `<updated>` (Atom) and `lastBuildDate` (RSS) are the newest item's `content_updated_at`. An empty feed uses the time the feed was first published, which is stored once. That keeps its bytes stable across ticks without an epoch date, which the W3C validator calls implausible.
 - **Ordering:** by pubDate descending. Backfilled releases keep their real dates, so they sort into the past rather than flooding the top of the feed.
 - **Deleted releases:** these are marked `missing_since` only after a confirmed 404 (§3.1, Deletion detection). They're dropped from the feed after 7 days, in case the deletion is a re-publish in progress.
 
@@ -524,8 +526,8 @@ Empty sections are omitted. The footer names the model and notes source (`releas
 release-digest run                       # scheduler + HTTP (container default)
 release-digest build                     # one poll+summarize+render pass, then exit
 release-digest summarize [--messages] owner/repo@tag  # dry run: resolve notes, call LLM, print result; writes nothing
-release-digest resummarize [--repo r] [--since 30d]
-release-digest config lint
+release-digest resummarize [--repo r] [--since 30d|all]   # marks rows; the next tick summarizes them (§3.3)
+release-digest config lint [--offline]
 release-digest validate [--w3c]
 release-digest healthcheck
 ```
@@ -654,6 +656,7 @@ CREATE TABLE releases (
   resolve_attempted_at INTEGER,             -- resolution queue order (§3.2)
   advisories_hash TEXT NOT NULL DEFAULT '', -- notes_hash last scanned for advisory IDs (§3.4)
   urgency_dirty  INTEGER NOT NULL DEFAULT 0, -- urgency inputs changed since the last decision (§3.4)
+  resummarize    INTEGER NOT NULL DEFAULT 0, -- when a fresh summary was asked for; 0 for none (§3.3)
   PRIMARY KEY (repo, tag)
 );
 CREATE INDEX releases_feed ON releases (state, published_at DESC);
@@ -768,6 +771,8 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - A post-initialization release recovered by reconciliation alerts. A pre-initialization one doesn't.
   - An ntfy outage that ends 30m before expiry, while the backoff is at 1h, still delivers via the final pre-expiry attempt.
   - A reconciliation interrupted by the budget resumes at `reconcile_next_page`.
+- **resummarize:** only the named repo's dated, undeleted rows inside `--since` are flagged. A flagged row bypasses the cache even when its request is cached, and the new answer replaces the cached one. New releases go first. A failed resummary keeps the old summary, the request and the backoff. A resummary gated after its call is published on a later tick without a second call. A request made while a summary is being made survives that summary. A resummary that de-escalates and then re-escalates never re-sends a sent alert.
+- **config lint:** a public repo passes. A private or missing repo, a token that can list private repos, and a refused LLM key all fail. A server that accepts only `json_object` is reported as such. A prose reply, or JSON without `ok`, is a warning. The LLM request carries no repo data, and the key is never printed.
 - **identity:** a `fallback` → `summarized` upgrade, a `fallback` → `no_notes` transition and a `no_notes` → `fallback` transition keep the GUID, the pubDate and feed membership, and advance Atom `<updated>`.
 - **secret:** a table test of the lookup order, both `X` and `X_FILE` set is an error, trailing-newline trimming, missing or empty files, and redaction under `fmt` `%v`/`%+v`/`%#v`, `slog` and `json.Marshal`. A test also asserts that an LLM 401 error message doesn't contain the key.
 - **feed:** golden RSS/Atom files, local spec checks, and `make validate` against W3C (not in every CI run).

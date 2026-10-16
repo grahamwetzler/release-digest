@@ -17,6 +17,7 @@ import (
 	"release-digest/internal/feed"
 	"release-digest/internal/github"
 	"release-digest/internal/github/githubtest"
+	"release-digest/internal/llm/llmtest"
 	"release-digest/internal/secret"
 )
 
@@ -160,7 +161,7 @@ func TestConfigLintReportsSourcesNotValues(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp_secretvalue")
 	t.Setenv("RELEASE_DIGEST_REPOS", "astral-sh/uv")
 	var out, errb bytes.Buffer
-	if code := run([]string{"config", "lint", "--config", writeConfig(t, "")}, &out, &errb); code != 0 {
+	if code := run([]string{"config", "lint", "--offline", "--config", writeConfig(t, "llm: {model: m}\n")}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	s := out.String()
@@ -173,11 +174,15 @@ func TestConfigLintReportsSourcesNotValues(t *testing.T) {
 	if strings.Contains(s, "secretvalue") {
 		t.Errorf("secret value printed:\n%s", s)
 	}
+	out.Reset()
+	if run([]string{"config", "lint", "--offline", "--config", writeConfig(t, "")}, &out, &errb); strings.Contains(out.String(), "is not a local address") {
+		t.Errorf("a key warning without a model:\n%s", out.String())
+	}
 
 	t.Setenv("GITHUB_TOKEN_FILE", "/nope")
 	out.Reset()
 	errb.Reset()
-	if code := run([]string{"config", "lint", "--config", writeConfig(t, "")}, &out, &errb); code != 1 ||
+	if code := run([]string{"config", "lint", "--offline", "--config", writeConfig(t, "")}, &out, &errb); code != 1 ||
 		!strings.Contains(errb.String(), "GITHUB_TOKEN and GITHUB_TOKEN_FILE are both set") {
 		t.Errorf("conflicting sources: exit %d: %s", code, errb.String())
 	}
@@ -236,5 +241,69 @@ func TestSIGHUPGuardsAReplacementToken(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "ghp_") {
 		t.Errorf("token logged:\n%s", logs.String())
+	}
+}
+
+func TestConfigLintChecksGitHubAndTheLLM(t *testing.T) {
+	cleanEnv(t)
+	gh := githubtest.New()
+	defer gh.Close()
+	gh.Repo("o/r")
+	gh.Repo("o/secret").Private = true
+	ai := llmtest.New(`{"ok": true}`)
+	defer ai.Close()
+	ai.Formats = []string{"json_object"} // like some Ollama versions
+	t.Setenv("LLM_API_KEY", "sk-or-v1-lintkey")
+	lint := func(extra string) (int, string, string) {
+		var out, errb bytes.Buffer
+		code := run([]string{"config", "lint", "--config", writeConfig(t, "github: {api_url: "+gh.URL+"}\n"+extra)}, &out, &errb)
+		return code, out.String(), errb.String()
+	}
+
+	code, out, errs := lint("llm: {base_url: " + ai.URL() + ", model: test/model}\nrepos: [{repo: o/r}]\n")
+	if code != 0 || !strings.Contains(out, "github: o/r: public") || !strings.Contains(out, "llm: test/model answered in") ||
+		!strings.Contains(out, "(response format: json_object)") || strings.Contains(out, "warning: llm: test/model answered, but") {
+		t.Errorf("a good config: exit %d\n%s%s", code, out, errs)
+	}
+	reqs := ai.Requests()
+	if len(reqs) == 0 || reqs[0].Header.Get("Authorization") != "Bearer sk-or-v1-lintkey" {
+		t.Fatalf("LLM requests: %+v", reqs)
+	}
+	for _, m := range reqs[len(reqs)-1].Messages {
+		if strings.Contains(m.Content, "o/r") {
+			t.Error("the LLM check sent repo data")
+		}
+	}
+	if strings.Contains(out+errs, "lintkey") {
+		t.Error("the llm key was printed")
+	}
+
+	code, out, errs = lint("repos: [{repo: o/r}, {repo: o/secret}, {repo: o/gone}]\n")
+	if code != 1 || !strings.Contains(errs, "o/secret is private or doesn't exist") || !strings.Contains(errs, "o/gone is private or doesn't exist") ||
+		!strings.Contains(errs, "2 problem(s)") || !strings.Contains(out, "llm: not checked (no llm.model)") {
+		t.Errorf("a private and a missing repo: exit %d\n%s%s", code, out, errs)
+	}
+
+	ai.SetDefault(func(llmtest.Request) llmtest.Reply { return llmtest.Reply{Status: 401, Message: "bad key"} })
+	code, _, errs = lint("llm: {base_url: " + ai.URL() + ", model: test/model}\nrepos: [{repo: o/r}]\n")
+	if code != 1 || !strings.Contains(errs, "error: llm: test/model at") || !strings.Contains(errs, "401") {
+		t.Errorf("a refused LLM key: exit %d\n%s", code, errs)
+	}
+	ai.SetDefault(func(llmtest.Request) llmtest.Reply { return llmtest.Reply{Content: "Hello! How can I help?"} })
+	code, out, _ = lint("llm: {base_url: " + ai.URL() + ", model: test/model}\nrepos: [{repo: o/r}]\n")
+	if code != 0 || !strings.Contains(out, "answered, but not with the requested JSON") {
+		t.Errorf("a prose reply: exit %d\n%s", code, out)
+	}
+	ai.SetDefault(func(llmtest.Request) llmtest.Reply { return llmtest.Reply{Content: `{"status": "fine"}`} })
+	code, out, _ = lint("llm: {base_url: " + ai.URL() + ", model: test/model}\nrepos: [{repo: o/r}]\n")
+	if code != 0 || !strings.Contains(out, "answered, but not with the requested JSON") {
+		t.Errorf("JSON without ok: exit %d\n%s", code, out)
+	}
+
+	t.Setenv("GITHUB_TOKEN", "ghp_x")
+	gh.PrivateRepos = 1
+	code, out, errs = lint("repos: [{repo: o/r}]\n")
+	if code != 1 || !strings.Contains(errs, "error: github:") || strings.Contains(out, "github: o/r") {
+		t.Errorf("a token that can see private repos: exit %d\n%s%s", code, out, errs)
 	}
 }

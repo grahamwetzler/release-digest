@@ -157,11 +157,18 @@ func (h *harness) confirm(repo string) {
 // add stores a release with resolved notes in state.
 func (h *harness) add(repo, tag, state string, seen time.Time) *store.Release {
 	h.t.Helper()
+	return h.addKeyed(repo, tag, state, "", seen)
+}
+
+// addKeyed is add with a summary key, for a summarized row.
+func (h *harness) addKeyed(repo, tag, state, key string, seen time.Time) *store.Release {
+	h.t.Helper()
 	ctx := context.Background()
 	hash, _ := h.st.PutNotes(ctx, "notes for "+tag)
 	r := &store.Release{Repo: repo, Tag: tag, GUID: ident.GUID(repo, tag), Kind: "release",
 		HTMLURL: "https://github.com/" + repo + "/releases/tag/" + tag, Published: seen, FirstSeen: seen,
-		State: state, Origin: store.OriginLive, NotesSource: "release_body", NotesHash: hash, NotesResolved: true}
+		State: state, Origin: store.OriginLive, NotesSource: "release_body", NotesHash: hash, NotesResolved: true,
+		SummaryKey: key}
 	if state != store.StatePending {
 		r.ContentUpdated = seen
 	}
@@ -452,14 +459,14 @@ func TestSummarizedNeedsTheTickConfirmation(t *testing.T) {
 	r := h.add("o/r", "v1", store.StatePending, t0)
 	// Another worker's failed check invalidates the confirmation.
 	h.st.Visibility(ctx, "o/r", h.tick, false, false, t0, "boom")
-	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", h.tick, t0); err != nil || ok {
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", t0, h.tick, t0); err != nil || ok {
 		t.Errorf("Summarized = %v, %v after the confirmation was lost", ok, err)
 	}
 	h.confirm("o/r")
-	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", h.tick-1, t0); err != nil || ok {
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", t0, h.tick-1, t0); err != nil || ok {
 		t.Errorf("Summarized = %v, %v for a stale tick", ok, err)
 	}
-	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", h.tick, t0); err != nil || !ok {
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", t0, h.tick, t0); err != nil || !ok {
 		t.Errorf("Summarized = %v, %v while confirmed", ok, err)
 	}
 }
@@ -500,5 +507,151 @@ func TestParseUrgency(t *testing.T) {
 	// A version 1 summary has no urgency.
 	if d, err := Decode(`{"headline":"ok","security":["CVE-1"]}`); err != nil || d.Urgency() != UrgencyNone {
 		t.Errorf("Decode(v1) = %+v, %v", d, err)
+	}
+}
+
+func TestResummarize(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.s.Cfg.LLM.Concurrency = 1
+	h.confirm("o/x")
+	key := func(tag string) string {
+		return Key(h.s.endpoint(), Messages(DefaultPrompt, Input{Repo: "o/r", Tag: tag, Source: "release_body", Notes: "notes for " + tag}))
+	}
+	summarized := func(tag string, published time.Time) {
+		h.addKeyed("o/r", tag, store.StateSummarized, key(tag), published)
+		h.st.PutSummary(ctx, &store.Summary{Key: key(tag), Model: "test/model", JSON: good, Created: published})
+	}
+	summarized("v1", t0.Add(-24*time.Hour))
+	summarized("old", t0.Add(-40*24*time.Hour)) // outside --since
+	fb := h.add("o/r", "fb", store.StateFallback, t0.Add(-48*time.Hour))
+	h.st.SummaryFailed(ctx, "o/r", fb.Tag, "earlier failure", t0) // backed off
+	h.add("o/r", "nonotes", store.StateNoNotes, t0)
+	h.add("o/x", "other", store.StateSummarized, t0) // another repo
+	summarized("gone", t0.Add(-time.Hour))
+	h.st.RecordVerify(ctx, "o/r", "gone", store.VerifyNotFound, t0) // deleted
+
+	got, err := h.st.RequestResummarize(ctx, "o/r", t0.Add(-30*24*time.Hour), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tags []string
+	for _, r := range got {
+		tags = append(tags, r.Tag)
+	}
+	if strings.Join(tags, ",") != "v1,fb" {
+		t.Fatalf("flagged %v, want v1 and fb", tags)
+	}
+	if v1 := h.get("o/r", "v1"); v1.State != store.StateSummarized || !v1.Resummarize.Equal(t0) {
+		t.Errorf("a flagged summarized row: state %s, flag %v", v1.State, v1.Resummarize)
+	}
+
+	// A new release goes before the flagged ones.
+	h.add("o/r", "new", store.StatePending, t0)
+	h.s.Cfg.LLM.MaxPerPass = 1
+	h.pass()
+	if reqs := h.fake.Requests(); len(reqs) != 1 || !strings.Contains(reqs[0].Messages[1].Content, "Version: new") {
+		t.Fatalf("the first pass didn't take the new release first: %d request(s)", len(reqs))
+	}
+
+	// The flagged rows get fresh calls, although v1's request is cached.
+	fresh := strings.Replace(good, "Adds streaming", "Fresh summary", 1)
+	h.fake.SetDefault(func(llmtest.Request) llmtest.Reply { return llmtest.Reply{Content: fresh} })
+	h.s.Cfg.LLM.MaxPerPass = 10
+	h.pass()
+	if n := len(h.fake.Requests()); n != 3 {
+		t.Errorf("%d LLM requests, want 3: new, then fb and v1", n)
+	}
+	for _, tag := range []string{"v1", "fb"} {
+		r := h.get("o/r", tag)
+		sum, _ := h.st.Summary(ctx, r.SummaryKey)
+		if r.State != store.StateSummarized || !r.Resummarize.IsZero() || r.SummaryKey != key(tag) || sum == nil || !strings.Contains(sum.JSON, "Fresh summary") {
+			t.Errorf("%s: state %s, flag %v, summary %+v", tag, r.State, r.Resummarize, sum)
+		}
+	}
+	if sum, _ := h.st.Summary(ctx, key("old")); !strings.Contains(sum.JSON, "Adds streaming") {
+		t.Error("a release outside --since was summarized again")
+	}
+	h.pass()
+	if n := len(h.fake.Requests()); n != 3 {
+		t.Errorf("a cleared flag was summarized again: %d requests", n)
+	}
+}
+
+func TestFailedResummarizeKeepsTheSummary(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	r := h.addKeyed("o/r", "v1", store.StateSummarized, "old", t0.Add(-time.Hour))
+	h.st.PutSummary(ctx, &store.Summary{Key: "old", Model: "test/model", JSON: good, Created: t0})
+	if _, err := h.st.RequestResummarize(ctx, "", time.Time{}, t0); err != nil {
+		t.Fatal(err)
+	}
+	h.fake.SetDefault(func(llmtest.Request) llmtest.Reply { return llmtest.Reply{Status: 500, Message: "down"} })
+	h.pass()
+	got := h.get(r.Repo, r.Tag)
+	if got.State != store.StateSummarized || got.SummaryKey != "old" || got.Resummarize.IsZero() || got.Attempts != 1 || !got.NextAttempt.After(t0) {
+		t.Errorf("after a failed resummarize: state %s, key %q, flag %v, attempts %d, next %v",
+			got.State, got.SummaryKey, got.Resummarize, got.Attempts, got.NextAttempt)
+	}
+}
+
+// A resummary stored but gated before publication is published later
+// without a second call; a request made after it asks for another.
+func TestGatedResummaryIsNotPaidForTwice(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	key := Key(h.s.endpoint(), Messages(DefaultPrompt, Input{Repo: "o/r", Tag: "v1", Source: "release_body", Notes: "notes for v1"}))
+	h.addKeyed("o/r", "v1", store.StateSummarized, key, t0.Add(-time.Hour))
+	h.st.PutSummary(ctx, &store.Summary{Key: key, Model: "test/model", JSON: good, Created: t0.Add(-time.Hour)})
+	if _, err := h.st.RequestResummarize(ctx, "", time.Time{}, t0); err != nil {
+		t.Fatal(err)
+	}
+	fresh := strings.Replace(good, "Adds streaming", "Fresh summary", 1)
+	h.fake.SetDefault(func(llmtest.Request) llmtest.Reply {
+		h.deny.Store(true) // the repo turns private while the call runs
+		return llmtest.Reply{Content: fresh}
+	})
+	h.now = t0.Add(time.Minute)
+	h.pass()
+	if r := h.get("o/r", "v1"); r.Resummarize.IsZero() || r.Attempts != 0 {
+		t.Fatalf("gated: flag %v, attempts %d; want still requested, not a failure", r.Resummarize, r.Attempts)
+	}
+
+	h.deny.Store(false)
+	h.fake.SetDefault(func(llmtest.Request) llmtest.Reply { return llmtest.Reply{Content: good} })
+	h.tick++
+	h.confirm("o/r")
+	h.pass()
+	r := h.get("o/r", "v1")
+	sum, _ := h.st.Summary(ctx, r.SummaryKey)
+	if n := len(h.fake.Requests()); n != 1 || !r.Resummarize.IsZero() || sum == nil || !strings.Contains(sum.JSON, "Fresh summary") {
+		t.Errorf("public again: %d requests, flag %v, summary %+v; want the stored one published, no new call", n, r.Resummarize, sum)
+	}
+
+	// A new request after that summary: it no longer counts.
+	h.now = t0.Add(time.Hour)
+	if _, err := h.st.RequestResummarize(ctx, "", time.Time{}, h.now); err != nil {
+		t.Fatal(err)
+	}
+	h.pass()
+	if n := len(h.fake.Requests()); n != 2 {
+		t.Errorf("%d requests after a second resummarize, want 2", n)
+	}
+}
+
+// A request made while its summary is being made isn't cleared by it.
+func TestLaterRequestSurvivesAnEarlierSummary(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	r := h.add("o/r", "v1", store.StateFallback, t0.Add(-time.Hour))
+	if _, err := h.st.RequestResummarize(ctx, "", time.Time{}, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// A summary created before the request, as by a pass already under way.
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", t0, h.tick, t0); err != nil || !ok {
+		t.Fatalf("Summarized: %v, %v", ok, err)
+	}
+	if got := h.get(r.Repo, r.Tag); got.State != store.StateSummarized || !got.Resummarize.Equal(t0.Add(time.Minute)) {
+		t.Errorf("state %s, request %v; want summarized and still requested", got.State, got.Resummarize)
 	}
 }

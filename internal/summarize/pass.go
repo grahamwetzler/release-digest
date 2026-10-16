@@ -199,6 +199,12 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 	if err != nil {
 		return false, err
 	}
+	// A resummarize asks for a summary made after the request: an older
+	// cached one doesn't count, but one stored by an earlier attempt whose
+	// publication was gated does, so it costs no second call.
+	if cached != nil && cached.Created.Before(r.Resummarize) {
+		cached = nil
+	}
 	if public, err := s.Gate(ctx, r.Repo); err != nil || !public {
 		return false, err
 	}
@@ -223,7 +229,11 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 		}
 		cached = &store.Summary{Key: res.Key, Model: s.LLM.Model, JSON: res.Summary.Encode(), Created: s.now(),
 			TokensIn: res.TokensIn, TokensOut: res.TokensOut}
-		if err := s.Store.PutSummary(ctx, cached); err != nil {
+		put := s.Store.PutSummary
+		if !r.Resummarize.IsZero() {
+			put = s.Store.ReplaceSummary
+		}
+		if err := put(ctx, cached); err != nil {
 			return false, err
 		}
 		// The call can take minutes: check again before publishing, in case
@@ -235,9 +245,9 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 	}
 	// Conditional on the repo's confirmation for this tick, atomically: a
 	// concurrent worker's failed check for the same repo stops it (§3.1).
-	ok, err := s.Store.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, tick, s.now())
+	ok, err := s.Store.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, cached.Created, tick, s.now())
 	if err == nil && ok {
-		s.Log.Info("summarized", "repo", r.Repo, "tag", r.Tag, "reused", reused, "tokens_in", cached.TokensIn, "tokens_out", cached.TokensOut)
+		s.Log.Info("summarized", "repo", r.Repo, "tag", r.Tag, "reused", reused, "resummarized", !r.Resummarize.IsZero(), "tokens_in", cached.TokensIn, "tokens_out", cached.TokensOut)
 	}
 	return ok, err
 }

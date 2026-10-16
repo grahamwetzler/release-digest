@@ -250,6 +250,10 @@ func PlainText(md string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// stateFirstPublished is when the feed was first published, in
+// scheduler_state.
+const stateFirstPublished = "feed_first_published_at"
+
 // Build renders every format from the store and checks it. It writes nothing.
 func Build(ctx context.Context, st *store.Store, c *config.Config, generator string, now time.Time) (map[string][]byte, error) {
 	rels, err := st.FeedReleases(ctx, c.Feed.MaxItems, now)
@@ -270,6 +274,13 @@ func Build(ctx context.Context, st *store.Store, c *config.Config, generator str
 		items[i] = Item(r, notes, sum)
 		if u := r.ContentUpdated; u.After(lastBuild) {
 			lastBuild = u
+		}
+	}
+	if lastBuild.IsZero() {
+		// An empty feed dates from its first publication: stable across
+		// ticks, and plausible (the epoch isn't, to validators).
+		if lastBuild, err = st.StateTime(ctx, stateFirstPublished); err != nil {
+			return nil, err
 		}
 	}
 	out := map[string][]byte{}
@@ -293,6 +304,15 @@ func Build(ctx context.Context, st *store.Store, c *config.Config, generator str
 // Every changed format is stored in one transaction: on error nothing is
 // stored and the last good feed keeps being served.
 func Publish(ctx context.Context, st *store.Store, c *config.Config, generator string, now time.Time) (map[string]*store.Rendered, error) {
+	first, err := st.StateTime(ctx, stateFirstPublished)
+	if err != nil {
+		return nil, err
+	}
+	if first.IsZero() {
+		if err := st.SetStateTime(ctx, stateFirstPublished, now.Truncate(time.Second)); err != nil {
+			return nil, err
+		}
+	}
 	built, err := Build(ctx, st, c, generator, now)
 	if err != nil {
 		return nil, err

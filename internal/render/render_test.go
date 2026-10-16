@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"release-digest/internal/config"
+	"release-digest/internal/feed"
 	"release-digest/internal/ident"
 	"release-digest/internal/store"
 	"release-digest/internal/summarize"
@@ -51,6 +52,28 @@ func TestEmptyFeedIsValid(t *testing.T) {
 		if probs := f.Check(out[f.Path]); len(probs) > 0 {
 			t.Errorf("%s: %v", f.Path, probs)
 		}
+	}
+}
+
+// An empty feed's <updated> is its first publication, not the epoch (which
+// the W3C validator calls implausible), and later ticks keep it.
+func TestEmptyFeedDatesFromItsFirstPublication(t *testing.T) {
+	st, c := setup(t)
+	ctx := context.Background()
+	first, err := Publish(ctx, st, c, "g", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<updated>" + feed.AtomDate(now.Truncate(time.Second)) + "</updated>"
+	if atom := string(first["feed.atom"].Bytes); !strings.Contains(atom, want) {
+		t.Errorf("empty feed lacks %s:\n%s", want, atom)
+	}
+	later, err := Publish(ctx, st, c, "g", now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(later["feed.atom"].Bytes, first["feed.atom"].Bytes) {
+		t.Error("an unchanged empty feed changed on a later tick")
 	}
 }
 

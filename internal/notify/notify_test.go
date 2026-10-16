@@ -208,7 +208,7 @@ func (h *harness) summarize(r *store.Release, s summarize.Summary) {
 	if err := h.st.PutSummary(ctx, &store.Summary{Key: key, Model: "m", JSON: s.Encode(), Created: h.now}); err != nil {
 		h.t.Fatal(err)
 	}
-	ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, h.tick, h.now)
+	ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, h.now, h.tick, h.now)
 	if err != nil || !ok {
 		h.t.Fatalf("Summarized: %v, %v", ok, err)
 	}
@@ -828,5 +828,46 @@ func TestChangesDuringTheCheckStopTheSend(t *testing.T) {
 				t.Errorf("after recompute: %s", n.State)
 			}
 		})
+	}
+}
+
+func TestResummarizeNeverResends(t *testing.T) {
+	h := newHarness(t, "")
+	ctx := context.Background()
+	notes := "## Security\n- Fix a remote code execution in the parser\n"
+	r := h.add("o/r", "v2.0.0", "v1.9.0", store.StateFallback, notes, time.Hour)
+	urgent := summarize.Summary{Headline: "Fixes RCE", Security: []string{"Fix remote code execution"}, SecurityUrgency: "urgent", SecurityReason: "RCE"}
+	h.summarize(r, urgent)
+	h.pass()
+	h.drain()
+	if n := h.alert(r); n == nil || n.State != store.AlertSent || h.ntfy.count() != 1 {
+		t.Fatalf("first alert: %+v, %d POSTs", n, h.ntfy.count())
+	}
+
+	// A resummary that de-escalates, then one that escalates again.
+	for _, s := range []summarize.Summary{
+		{Headline: "Parser hardening", Security: []string{"Hardens the parser"}, SecurityUrgency: "none"},
+		{Headline: "Fixes RCE again", Security: []string{"Fix remote code execution"}, SecurityUrgency: "urgent", SecurityReason: "RCE"},
+	} {
+		if _, err := h.st.RequestResummarize(ctx, "o/r", time.Time{}, h.now); err != nil {
+			t.Fatal(err)
+		}
+		h.nextTick(time.Hour)
+		// A fresh answer under a new key, as after a model change.
+		key := "resummary-" + s.Headline
+		if err := h.st.PutSummary(ctx, &store.Summary{Key: key, Model: "m2", JSON: s.Encode(), Created: h.now}); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, h.now, h.tick, h.now); err != nil || !ok {
+			t.Fatalf("Summarized: %v, %v", ok, err)
+		}
+		h.pass()
+		h.drain()
+		if got := h.get("o/r", "v2.0.0"); got.Urgency != s.Urgency() || !got.Resummarize.IsZero() {
+			t.Errorf("%s: urgency %s, flag %v", s.Headline, got.Urgency, got.Resummarize)
+		}
+	}
+	if n := h.alert(r); n.State != store.AlertSent || h.ntfy.count() != 1 {
+		t.Errorf("after resummaries: %s, %d POSTs", n.State, h.ntfy.count())
 	}
 }

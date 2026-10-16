@@ -243,17 +243,18 @@ func (s ops) ResolveAttempted(ctx context.Context, repo, tag string, at time.Tim
 }
 
 // UnresolvedNotes returns up to n rows due for notes resolution in repos
-// confirmed in tick (§3.2): dated pending and fallback rows whose notes
-// aren't resolved, then no_notes rows published since recent and not tried
-// since retry, which are rechecked in case notes appeared. Within each
-// group, rows never attempted come first, then the least recently attempted.
+// confirmed in tick (§3.2): dated pending, fallback and no_notes rows whose
+// notes aren't resolved (a body edit unresolves them), whatever their age;
+// then resolved no_notes rows published since recent and not tried since
+// retry, which are rechecked in case notes appeared. Within each group,
+// rows never attempted come first, then the least recently attempted.
 func (s ops) UnresolvedNotes(ctx context.Context, tick int64, n int, recent, retry time.Time) ([]*Release, error) {
 	rows, err := s.q.QueryContext(ctx, `SELECT `+prefixed("r.")+` FROM releases r
 		JOIN repo_state rs ON rs.repo = r.repo AND rs.visibility_confirmed_tick = ?1 AND rs.held = 0
 		WHERE r.published_at IS NOT NULL AND (
-			(r.notes_resolved = 0 AND r.state IN (?2, ?3))
+			(r.notes_resolved = 0 AND r.state IN (?2, ?3, ?4))
 			OR (r.state = ?4 AND r.published_at > ?5 AND (r.resolve_attempted_at IS NULL OR r.resolve_attempted_at <= ?6)))
-		ORDER BY r.state = ?4, r.resolve_attempted_at IS NOT NULL, r.resolve_attempted_at, r.first_seen_at, r.repo, r.tag
+		ORDER BY r.notes_resolved, r.resolve_attempted_at IS NOT NULL, r.resolve_attempted_at, r.first_seen_at, r.repo, r.tag
 		LIMIT ?7`, tick, StatePending, StateFallback, StateNoNotes, toMS(recent), toMS(retry), n)
 	if err != nil {
 		return nil, err

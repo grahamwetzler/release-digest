@@ -24,15 +24,17 @@ var (
 // headings finds the ATX and setext headings of md outside fenced code.
 func headings(lines []string) []heading {
 	var out []heading
-	fence := ""
+	fence := "" // the open fence's run of ` or ~, if any
 	for i := 0; i < len(lines); i++ {
 		l := lines[i]
 		t := strings.TrimLeft(l, " ")
-		if len(l)-len(t) <= 3 && (strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~")) {
+		if run := fenceRun(t); len(l)-len(t) <= 3 && run != "" {
 			switch {
 			case fence == "":
-				fence = t[:3]
-			case strings.HasPrefix(t, fence):
+				fence = run
+			// Only a run of the same character, at least as long and with
+			// nothing after it, closes the fence (CommonMark).
+			case run[0] == fence[0] && len(run) >= len(fence) && strings.TrimSpace(t[len(run):]) == "":
 				fence = ""
 			}
 			continue
@@ -56,6 +58,22 @@ func headings(lines []string) []heading {
 		}
 	}
 	return out
+}
+
+// fenceRun is the run of three or more backticks or tildes that starts t,
+// or "".
+func fenceRun(t string) string {
+	if t == "" || (t[0] != '`' && t[0] != '~') {
+		return ""
+	}
+	n := 0
+	for n < len(t) && t[n] == t[0] {
+		n++
+	}
+	if n < 3 {
+		return ""
+	}
+	return t[:n]
 }
 
 // Section returns the changelog section for a version: the first level

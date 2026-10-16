@@ -992,3 +992,34 @@ func TestResolutionIsGatedAndStopsOnRateLimits(t *testing.T) {
 		t.Errorf("%d contents requests for an unconfirmed repo", n)
 	}
 }
+
+func TestEditedOldNoNotesReleaseIsResolved(t *testing.T) {
+	h := newHarness(t, "defaults: {backfill: 1}\nrepos: [{repo: o/r}]")
+	repo := h.gh.Repo("o/r")
+	repo.Releases = []githubtest.Release{{Tag: "v1.0.0", Published: t0.Add(-time.Hour)}}
+	h.tick()
+	if r := h.row("o/r", "v1.0.0"); r.State != store.StateNoNotes {
+		t.Fatalf("row = %+v", r)
+	}
+	// Long after the recheck window, the body is edited; the first attempt fails.
+	repo.Releases[0].Body = "Fixed a crash."
+	h.now = t0.Add(30 * 24 * time.Hour)
+	h.gh.Before = func(r *http.Request) {
+		repo.Status = 0
+		if strings.Contains(r.URL.Path, "/contents") {
+			repo.Status = http.StatusBadGateway
+		}
+	}
+	h.tick()
+	if r := h.row("o/r", "v1.0.0"); r.NotesResolved || r.State != store.StateNoNotes {
+		t.Fatalf("after a failed attempt: %+v", r)
+	}
+	h.gh.Before, repo.Status = nil, 0
+	h.now = h.now.Add(time.Hour) // retried next tick, not a day later
+	h.tick()
+	r := h.row("o/r", "v1.0.0")
+	text, _ := h.st.Notes(h.ctx, r.NotesHash)
+	if r.State != store.StateFallback || text != "Fixed a crash." || !r.ContentUpdated.Equal(h.now) {
+		t.Errorf("after the retry: %+v, notes %q", r, text)
+	}
+}

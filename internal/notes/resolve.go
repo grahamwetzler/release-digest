@@ -49,7 +49,7 @@ func FromBody(body string, maxChars int) (Result, bool) {
 // Resolve picks the notes for req (§3.2), in order: a substantive body; the
 // changelog section; a body that pointed at a changelog without one, if it
 // is long enough to stand alone; the commit log since the predecessor; a
-// short body that isn't just a pointer; else none. Any error but a 404 is
+// short body that says more than "see the changelog"; else none. Any error but a 404 is
 // returned, so a transient failure never resolves to "no notes".
 func (r *Resolver) Resolve(ctx context.Context, req Request) (Result, error) {
 	body := strings.TrimSpace(req.Body)
@@ -74,7 +74,7 @@ func (r *Resolver) Resolve(ctx context.Context, req Request) (Result, error) {
 	if log != "" {
 		return Result{SourceCompare, Truncate(log, r.MaxChars)}, nil
 	}
-	if s != "" && !pointer.MatchString(s) {
+	if beyondPointer(s) {
 		return Result{SourceBody, Truncate(body, r.MaxChars)}, nil
 	}
 	return Result{}, nil

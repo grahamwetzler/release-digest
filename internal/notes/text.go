@@ -6,6 +6,7 @@ package notes
 import (
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"release-digest/internal/github"
@@ -41,6 +42,22 @@ func substance(body string) string {
 func Substantive(body string) bool {
 	s := substance(body)
 	return utf8.RuneCountInString(s) >= MinBody && !pointer.MatchString(s)
+}
+
+// sentenceEnd splits text into sentences: a line break, or ., ! or ?
+// before a space or the end ("CHANGELOG.md" stays whole).
+var sentenceEnd = regexp.MustCompile(`[.!?]+(\s|$)|\n`)
+
+// beyondPointer reports whether text says anything besides pointing at the
+// changelog: some sentence with a letter in it doesn't mention it. "Bug
+// fixes. See CHANGELOG.md" does; "See CHANGELOG.md for details." doesn't.
+func beyondPointer(text string) bool {
+	for _, s := range sentenceEnd.Split(text, -1) {
+		if !pointer.MatchString(s) && strings.IndexFunc(s, unicode.IsLetter) >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // TruncatedMarker ends notes cut to the input budget.

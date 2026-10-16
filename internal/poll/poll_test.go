@@ -811,3 +811,30 @@ func TestPendingNotesFollowBodyEdits(t *testing.T) {
 		}
 	}
 }
+
+func TestDateOrderedPredecessorsAfterOutOfOrderDating(t *testing.T) {
+	h := newHarness(t, "repos: [{repo: o/r, sources: [tags], tag_pattern: '^[a-z]+$'}]")
+	repo := h.gh.Repo("o/r")
+	h.tick() // first sight of an empty tag list
+	// Two date-ordered tags arrive; the queue dates "newer" first (it sorts first by name).
+	repo.Tags = []githubtest.Tag{
+		{Name: "newer", SHA: "n", Date: t0.Add(-time.Hour)},
+		{Name: "older", SHA: "o", Date: t0.Add(-2 * time.Hour)},
+	}
+	h.now = t0.Add(time.Hour)
+	h.tick()
+	if r := h.row("o/r", "newer"); r == nil || r.Published.IsZero() || r.PrevTag != "older" {
+		t.Errorf("newer = %+v, want prev_tag older", r)
+	}
+}
+
+func TestFirstScanStartComparedAtSecondPrecision(t *testing.T) {
+	h := newHarness(t, "defaults: {backfill: 0}\nrepos: [{repo: o/r}]")
+	h.now = t0.Add(500 * time.Millisecond)
+	// Published in the scan's starting second: GitHub reports it as t0 exactly.
+	h.gh.Repo("o/r").Releases = []githubtest.Release{{Tag: "v1.0.0", Published: t0}}
+	h.tick()
+	if r := h.row("o/r", "v1.0.0"); r == nil || r.Origin != store.OriginLive || r.State != store.StatePending {
+		t.Errorf("release in the start second = %+v, want live and pending", r)
+	}
+}

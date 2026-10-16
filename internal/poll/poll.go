@@ -454,7 +454,9 @@ func (p *Poller) scanReleases(ctx context.Context, r *config.Repo, page1 []entry
 				row := p.newRow(r, e, start)
 				filtered := p.filtered(r, row)
 				switch {
-				case first && e.Published.After(start):
+				case first && !e.Published.Before(start.Truncate(time.Second)):
+					// GitHub dates are whole seconds: a release in the scan's
+					// starting second may have come after it, so it counts as live.
 					row.Origin = store.OriginLive // released while this first scan ran
 				case first:
 					row.Origin = store.OriginBackfill
@@ -921,11 +923,22 @@ func (p *Poller) drainMetadata(ctx context.Context, tick int64, b *budget) error
 					}
 				}
 			}
-			if r.Version == "" && r.State != store.StateSkipped { // date-ordered: the predecessor needs the date
-				r.Published = date.UTC()
-				return setPredecessors(ctx, tx, []*store.Release{r})
+			if r.Version != "" {
+				return nil
 			}
-			return nil
+			// Date-ordered: a new date can change the predecessor of every dated
+			// row in the stream, including ones dated earlier, so recompute them all.
+			stream, err := tx.StreamReleases(ctx, r.Repo, r.Stream)
+			if err != nil {
+				return err
+			}
+			var dated []*store.Release
+			for _, s := range stream {
+				if s.Version == "" && s.State != store.StateSkipped && !s.Published.IsZero() {
+					dated = append(dated, s)
+				}
+			}
+			return setPredecessors(ctx, tx, dated)
 		})
 		if err != nil {
 			return err

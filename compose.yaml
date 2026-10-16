@@ -14,7 +14,7 @@ services:
       RELEASE_DIGEST_REPOS: |
         anthropics/anthropic-sdk-go
         astral-sh/uv
-      # The LLM defaults to OpenRouter (deploy/release-digest.yaml). For the
+      # The LLM defaults to OpenRouter. For the
       # local Ollama service below instead:
       # RELEASE_DIGEST_LLM_BASE_URL: http://ollama:11434/v1
       # RELEASE_DIGEST_LLM_MODEL: qwen3:8b
@@ -24,11 +24,10 @@ services:
       # A named volume works as is. A bind mount (./data:/data) must be
       # writable by the container's nonroot user: chown 65532:65532 ./data
       - release-digest-data:/data
-      # A directory, not a single file, so an editor's save-by-rename is seen.
-      - ./deploy:/config:ro
     expose: ["8080"] # the reverse proxy joins this network; no host port needed
-    # Per-host settings (the real public URL, a host port, the ntfy_url and
-    # ntfy_token secrets for security alerts, docs/security-alerts.md) go in an
+    # Per-host settings (the real public URL, a host port, a config file with
+    # per-repo options, the ntfy_url and ntfy_token secrets for security
+    # alerts, docs/security-alerts.md) go in an
     # untracked compose.override.yaml, which docker compose merges in
     # automatically.
 

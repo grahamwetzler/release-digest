@@ -49,7 +49,7 @@ messages.
 make build      # bin/release-digest
 make test       # go test ./...
 make vet        # go vet ./...
-make lint       # config lint --offline on deploy/release-digest.yaml
+make lint       # config lint --offline on release-digest.example.yaml
 make validate   # W3C-validate a feed built with `release-digest build`
 make docker     # the container image
 ```

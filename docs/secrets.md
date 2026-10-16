@@ -35,7 +35,7 @@ password.
   fatal error naming the path. A plain env var set to an empty string is also
   fatal.
 - **Not in YAML.** The config loader rejects `api_key` and `token` keys, so a
-  key can't end up committed to `deploy/`.
+  key can't end up committed with a config file.
 
 ## Rotation
 

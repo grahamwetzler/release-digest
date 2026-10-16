@@ -11,11 +11,11 @@ test:
 vet:
 	go vet ./...
 
-# Lints the config baked into the image, offline: no network or secrets
+# Lints the example config, offline: no network or secrets
 # needed. Run `release-digest config lint` on the host to also check the
 # repos and the LLM.
 lint: build
-	RELEASE_DIGEST_PUBLIC_BASE_URL=https://rss.example.com ./bin/release-digest config lint --offline --config deploy/release-digest.yaml
+	RELEASE_DIGEST_PUBLIC_BASE_URL=https://rss.example.com ./bin/release-digest config lint --offline --config release-digest.example.yaml
 
 # Posts the rendered feed to the W3C Feed Validation Service. Needs a store
 # populated by `release-digest build`. Run it locally or in CI, not on every commit.

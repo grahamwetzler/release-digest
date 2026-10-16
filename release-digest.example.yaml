@@ -1,6 +1,7 @@
-# The config baked into the image. Repos usually come from
-# RELEASE_DIGEST_REPOS in compose.yaml; list per-repo options here.
-# Secrets never go in this file (docs/secrets.md).
+# An example config, not a recommended one. Copy it, keep what you need,
+# and mount your copy at /config/release-digest.yaml (see README.md).
+# docs/configuration.md lists every setting. Secrets never go in this
+# file (docs/secrets.md).
 version: 1
 
 store_path: /data/release-digest.db

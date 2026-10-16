@@ -46,14 +46,14 @@ documented in [docs/](docs/README.md).
 
 2. **List your repos** in `compose.yaml` (`RELEASE_DIGEST_REPOS`, one per
    line), and set `RELEASE_DIGEST_PUBLIC_BASE_URL` to the URL the feed will be
-   served from. Per-repo options go in `deploy/release-digest.yaml`.
-   Host-specific settings, such as a published port, go in an untracked
-   `compose.override.yaml`:
+   served from. Host-specific settings, such as a published port or a config
+   file with per-repo options, go in an untracked `compose.override.yaml`:
 
    ```yaml
    services:
      release-digest:
        ports: ["127.0.0.1:8080:8080"]
+       volumes: ["./config.yaml:/config/release-digest.yaml:ro"]   # optional
    ```
 
 3. **Check and start it:**
@@ -107,8 +107,10 @@ which format the server accepted.
 
 ## Configuration
 
-The config is YAML (`deploy/release-digest.yaml` in the image, or `--config`).
-A few settings can also come from the environment:
+The config is YAML, read from `--config` or `RELEASE_DIGEST_CONFIG`. The
+image has a minimal one at `/config/release-digest.yaml`; mount your own file
+there to change it. [release-digest.example.yaml](release-digest.example.yaml)
+is a starting point. A few settings can also come from the environment:
 
 | Setting | Env var |
 |---|---|
@@ -232,7 +234,7 @@ releases. Each one keeps its current summary until the new one is ready.
 ```sh
 go run ./cmd/release-digest run   # reads ./release-digest.yaml (gitignored; create your own)
 make test                         # go test ./...
-make lint                         # config lint --offline on deploy/release-digest.yaml
+make lint                         # config lint --offline on release-digest.example.yaml
 make validate                     # W3C-validate a feed built with `release-digest build`
 ```
 

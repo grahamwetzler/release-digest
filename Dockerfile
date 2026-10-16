@@ -11,11 +11,14 @@ ARG VERSION=dev
 ARG TARGETOS TARGETARCH
 # modernc.org/sqlite is pure Go, so the binary is static.
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/release-digest ./cmd/release-digest \
- && mkdir /out/data
+ && mkdir /out/data /out/config \
+ && printf 'version: 1\nstore_path: /data/release-digest.db\n' > /out/config/release-digest.yaml
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/release-digest /release-digest
-COPY deploy/release-digest.yaml /config/release-digest.yaml
+# Only the store path differs from the defaults. Mount your own config over
+# this file for per-repo options.
+COPY --from=build /out/config /config
 # A named volume copies this directory's owner, so the nonroot user can write
 # the store. A bind-mounted /data must be writable by uid 65532 itself.
 COPY --from=build --chown=nonroot:nonroot /out/data /data

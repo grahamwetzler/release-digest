@@ -32,8 +32,10 @@ func TextFixes(notes, id string) bool {
 	return false
 }
 
-// mentions reports whether line contains the normalized advisory ID id.
+// mentions reports whether line contains the normalized advisory ID id,
+// also inside Markdown emphasis such as _CVE-…_.
 func mentions(line, id string) bool {
+	line = emphasis.Replace(line)
 	for _, re := range []*regexp.Regexp{ghsaID, cveID} {
 		for _, m := range re.FindAllString(line, -1) {
 			if Normalize(m) == id {

@@ -26,8 +26,10 @@ var (
 
 // Extract returns the advisory IDs in notes, in order of first mention and
 // normalized: GHSA-xxxx-xxxx-xxxx with a lowercase body, CVE-YYYY-N in
-// uppercase. At most MaxPerRelease are returned.
+// uppercase. IDs inside Markdown emphasis (_CVE-…_) count. At most
+// MaxPerRelease are returned.
 func Extract(notes string) []string {
+	notes = emphasis.Replace(notes)
 	type hit struct {
 		at int
 		id string

@@ -799,3 +799,34 @@ func TestStaleAlertsWaitForRecompute(t *testing.T) {
 		}
 	})
 }
+
+func TestChangesDuringTheCheckStopTheSend(t *testing.T) {
+	ctx := context.Background()
+	for name, change := range map[string]func(h *harness){
+		"notes changed": func(h *harness) {
+			hash, _ := h.st.PutNotes(ctx, "Faster startup")
+			h.st.ResolveNotes(ctx, "o/r", "v1.2.3", "release_body", hash, h.now)
+		},
+		"deleted": func(h *harness) { h.st.RecordVerify(ctx, "o/r", "v1.2.3", store.VerifyNotFound, h.now) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, "")
+			h.setAdvisory(ghsa, advisoryJSON(ghsa, "high", false))
+			r := h.add("o/r", "v1.2.3", "v1.2.2", store.StateFallback, fixNotes, time.Hour)
+			h.pass()
+			check := h.o.Check
+			h.o.Check = func(ctx context.Context, repo string) (github.Visibility, error) {
+				change(h) // after the claim, before the POST
+				return check(ctx, repo)
+			}
+			h.drain()
+			if h.ntfy.count() != 0 {
+				t.Fatal("sent a stale alert")
+			}
+			h.pass()
+			if n := h.alert(r); n.State != store.AlertCancelled {
+				t.Errorf("after recompute: %s", n.State)
+			}
+		})
+	}
+}

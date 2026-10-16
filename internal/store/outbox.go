@@ -160,8 +160,7 @@ func (s *Store) Claim(ctx context.Context, now time.Time) (*Notification, error)
 		n, err = scanNotification(tx.q.QueryRowContext(ctx, `SELECT `+prefixedWith("n.", notificationColumns)+` FROM notifications n
 			JOIN releases r ON r.guid = n.guid
 			LEFT JOIN repo_state rs ON rs.repo = n.repo
-			WHERE n.state = ? AND n.next_attempt_at <= ? AND n.expires_at > ? AND COALESCE(rs.held, 0) = 0
-			  AND r.urgency_dirty = 0 AND r.advisories_hash = r.notes_hash AND r.missing_since IS NULL
+			WHERE n.state = ? AND n.next_attempt_at <= ? AND n.expires_at > ? AND `+releaseSendable+`
 			ORDER BY n.next_attempt_at, n.created_at, n.guid LIMIT 1`, AlertQueued, toMS(now), toMS(now)))
 		if errors.Is(err, sql.ErrNoRows) {
 			n = nil
@@ -178,20 +177,27 @@ func (s *Store) Claim(ctx context.Context, now time.Time) (*Notification, error)
 }
 
 // Sendable re-reads a claimed alert immediately before its POST (§3.4): it
-// returns the row if it is still sending with no cancel request and its
-// repo isn't held (another check may have found it private since the
-// worker's own), else nil.
+// returns the row if it is still sending with no cancel request, its repo
+// isn't held (another check may have found it private since the worker's
+// own), and its release still passes Claim's conditions (no pending
+// recompute, notes scanned, not deleted); else nil.
 func (s ops) Sendable(ctx context.Context, guid string) (*Notification, error) {
 	n, err := s.Notification(ctx, guid)
 	if err != nil || n == nil || n.State != AlertSending || n.CancelRequested {
 		return nil, err
 	}
-	rs, err := s.RepoState(ctx, n.Repo)
-	if err != nil || rs.Held {
+	var ok bool
+	err = s.q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM releases r LEFT JOIN repo_state rs ON rs.repo = r.repo
+		WHERE r.guid = ? AND `+releaseSendable+`)`, guid).Scan(&ok)
+	if err != nil || !ok {
 		return nil, err
 	}
 	return n, nil
 }
+
+// releaseSendable is what a release (r) and its repo (rs) must satisfy for
+// its alert to be claimed or sent.
+const releaseSendable = `COALESCE(rs.held, 0) = 0 AND r.urgency_dirty = 0 AND r.advisories_hash = r.notes_hash AND r.missing_since IS NULL`
 
 // Finish ends a claim in exactly one state (§3.4): sent on a 2xx; else
 // cancelled if a cancel was requested; else queued again for next, with

@@ -20,6 +20,9 @@ func TestExtract(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("Extract = %q, want %q", got, want)
 	}
+	if got := Extract("Fixes _CVE-2026-4321_ and *GHSA-cfgh-2345-mpqr*"); !slices.Equal(got, []string{"CVE-2026-4321", "GHSA-cfgh-2345-mpqr"}) {
+		t.Errorf("Extract in emphasis = %q", got)
+	}
 	var many string
 	for i := range MaxPerRelease + 5 {
 		many += fmt.Sprintf("CVE-2026-%05d\n", i)
@@ -55,7 +58,9 @@ func TestTextFixes(t *testing.T) {
 		{"Bump foo to address CVE-2026-1234", false}, // the verb doesn't start the line
 		{"CVE-2026-1234 is not yet fixed", false},
 		{"Known issue: CVE-2026-1234 (fixed in 2.0)", false},
-		{"Fix CVE-2026-9999", false},                        // another advisory
+		{"Fix CVE-2026-9999", false},                // another advisory
+		{"Fix _CVE-2026-1234_ in the parser", true}, // Markdown emphasis
+		{"Fix **CVE-2026-1234**", true},
 		{"Fix CVE-2026-12345", false},                       // a longer ID that starts the same
 		{"- Fix cve-2026-1234 (also CVE-2026-12345)", true}, // case-insensitive, whole ID
 	} {

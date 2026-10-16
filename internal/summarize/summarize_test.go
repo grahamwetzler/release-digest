@@ -381,7 +381,8 @@ func TestInstructionsReachTheRequest(t *testing.T) {
 	}
 	r := users["o/r"]
 	block := "<instructions>\nLead with CLI changes.\n</instructions>"
-	if i, n := strings.Index(r, block), strings.Index(r, "<notes>"); i < 0 || n < i || !strings.Contains(r, "security_urgency") {
+	if i, n := strings.Index(r, block), strings.Index(r, "<notes>"); i < 0 || n < i ||
+		!strings.Contains(r, "They don't apply to security, security_urgency or security_reason: list every security fix") {
 		t.Errorf("o/r request:\n%s", r)
 	}
 	if q, ok := users["o/q"]; !ok || strings.Contains(q, "instructions") {

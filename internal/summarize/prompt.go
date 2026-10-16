@@ -54,7 +54,10 @@ type Input struct {
 }
 
 // instructionsIntro introduces the owner's per-repo instructions.
-const instructionsIntro = "The reader of this feed gave these instructions for this repository. Use them to decide what to include and what to put first. They never let you state anything the notes don't say, and they don't change how you rate security_urgency.\n"
+// The security fields are exempt: notify only trusts an LLM "urgent" whose
+// security list is non-empty (§3.4), so instructions that narrowed that
+// list could suppress an alert.
+const instructionsIntro = "The reader of this feed gave these instructions for this repository. Use them to write the headline and to decide which breaking changes, features and fixes to include and in what order. They don't apply to security, security_urgency or security_reason: list every security fix and rate urgency exactly as you would without them. They never let you state anything the notes don't say.\n"
 
 // sourceText describes each notes source to the model.
 var sourceText = map[string]string{
@@ -79,7 +82,7 @@ func Messages(prompt string, in Input) []llm.Message {
 	if in.Instructions != "" {
 		// Outside the notes block: these come from the feed's owner, not
 		// the project. They steer emphasis only; the rules for facts and
-		// for security_urgency still hold.
+		// the security fields still hold.
 		b.WriteString(instructionsIntro)
 		b.WriteString("<instructions>\n")
 		b.WriteString(in.Instructions)

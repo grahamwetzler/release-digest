@@ -14,9 +14,11 @@ Ollama, LM Studio, vLLM or OpenAI.
 
 - **One item per release.** It uses the release body, the matching section of
   `CHANGELOG.md`, or the commit log, in that order. Tag-only repos work too.
-- **Nothing waits on the LLM.** A new release is published at once with an
-  excerpt of its notes, then upgraded in place once its summary is ready. The
-  item's GUID and date don't change.
+- **Nothing waits long on the LLM.** A new release is published as soon as its
+  summary is ready. If the LLM hasn't answered within `llm.publish_after`
+  (default 6h), the release is published with an excerpt of its notes and
+  upgraded in place once the summary arrives. The item's GUID and date don't
+  change.
 - **Urgent security alerts** can be sent to [ntfy](https://ntfy.sh). See
   [Security alerts](#security-alerts).
 - **Public repositories only.** Every poll checks that the repo is public
@@ -72,7 +74,10 @@ reports health. Put a TLS-terminating reverse proxy in front of it.
 ### GitHub token
 
 The service works without a token, but GitHub then allows only 60 requests an
-hour, which is enough for a handful of repos. Use a **fine-grained personal
+hour. That's enough to keep a handful of repos up to date, but the first poll
+of a new repo also backfills its recent releases, and two repos can use a whole
+hour's quota. The service then waits for the limit to reset and carries on.
+Use a **fine-grained personal
 access token** with the **Public repositories (read-only)** access level and no
 permissions. At startup, the token guard rejects a token that can list private
 repos. GitHub can't prove that a token is public-only, so the guard is defense

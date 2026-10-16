@@ -53,6 +53,13 @@ type Poller struct {
 	Cfg   *config.Config
 	Log   *slog.Logger
 	Now   func() time.Time // replaceable in tests
+
+	// checkMu serializes recording just-in-time checks, which concurrent
+	// summarize workers make. lost latches a repo whose check failed in a
+	// tick: a public answer recorded later in that tick, possibly to a
+	// request sent earlier, doesn't restore its confirmation (§3.1).
+	checkMu sync.Mutex
+	lost    map[string]int64 // repo → tick
 }
 
 func (p *Poller) now() time.Time {
@@ -180,8 +187,23 @@ func (p *Poller) recordVisibility(ctx context.Context, repo string, tick int64, 
 
 // CheckNow is the just-in-time public check before an exposing action
 // (§3.1), such as a promotion or an LLM call. Any outcome but public invalidates the tick's confirmation.
+//
+// Once a check fails in a tick, the repo stays unconfirmed for the rest of
+// it, whatever later checks answer: with concurrent checks, an answer
+// recorded later isn't necessarily newer.
 func (p *Poller) CheckNow(ctx context.Context, repo string, tick int64, during string) (bool, error) {
 	vis, err := p.GH.CheckPublic(ctx, repo, 0)
+	p.checkMu.Lock()
+	defer p.checkMu.Unlock()
+	if vis.Public && p.lost[repo] == tick {
+		return false, nil
+	}
+	if !vis.Public {
+		if p.lost == nil {
+			p.lost = map[string]int64{}
+		}
+		p.lost[repo] = tick
+	}
 	if serr := p.recordVisibility(ctx, repo, tick, vis, err, during); serr != nil {
 		return false, serr
 	}

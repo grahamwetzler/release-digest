@@ -232,3 +232,30 @@ func TestRotatedKeyIsRedacted(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestBeforeRunsBeforeEveryLaterRequest(t *testing.T) {
+	f := llmtest.New(`{}`)
+	defer f.Close()
+	f.Formats = []string{"json_object"}                  // one format fallback
+	f.Queue(llmtest.Reply{Status: 502}, llmtest.Reply{}) // then one retry
+	r := req
+	calls := 0
+	r.Before = func(context.Context) error { calls++; return nil }
+	if _, err := client(f, nil).Complete(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.Requests()); n != 3 || calls != 2 {
+		t.Errorf("%d requests, Before called %d times; want 3 and 2", n, calls)
+	}
+
+	stop := errors.New("gated")
+	f.Queue(llmtest.Reply{Status: 503})
+	before := len(f.Requests())
+	r.Before = func(context.Context) error { return stop }
+	if _, err := client(f, nil).Complete(context.Background(), r); !errors.Is(err, stop) {
+		t.Errorf("err = %v, want Before's error", err)
+	}
+	if n := len(f.Requests()) - before; n != 1 {
+		t.Errorf("%d requests after Before failed, want 1", n)
+	}
+}

@@ -32,6 +32,10 @@ type Request struct {
 	Messages []Message
 	Name     string
 	Schema   json.RawMessage
+	// Before, if set, runs before every HTTP request of the call but the
+	// first: each retry and each response-format fallback. An error stops
+	// the call and is returned as is. The caller checks before calling.
+	Before func(context.Context) error
 }
 
 // Response is a completion's text and token usage, if reported.
@@ -91,8 +95,9 @@ func (e *StatusError) Error() string {
 // Complete sends req. If the server rejects the response format, it retries
 // with the next one, and later calls start from the format that worked.
 func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
+	sent := 0
 	for f := int(c.format.Load()); ; f++ {
-		resp, err := c.complete(ctx, req, f)
+		resp, err := c.complete(ctx, req, f, &sent)
 		var se *StatusError
 		if f < FormatPrompt && errors.As(err, &se) && formatRejected(se) {
 			c.format.CompareAndSwap(int32(f), int32(f+1))
@@ -116,12 +121,19 @@ func formatRejected(e *StatusError) bool {
 
 // complete makes one call in format f, retrying 429 and 5xx answers and
 // network errors with jittered exponential backoff.
-func (c *Client) complete(ctx context.Context, req Request, f int) (*Response, error) {
+// sent counts the HTTP requests of the whole call, for req.Before.
+func (c *Client) complete(ctx context.Context, req Request, f int, sent *int) (*Response, error) {
 	body, err := c.body(req, f)
 	if err != nil {
 		return nil, err
 	}
 	for try := 0; ; try++ {
+		if *sent > 0 && req.Before != nil {
+			if err := req.Before(ctx); err != nil {
+				return nil, err
+			}
+		}
+		*sent++
 		resp, wait, err := c.post(ctx, body)
 		if err == nil || try >= Retries || wait < 0 || wait > MaxRetryAfter || ctx.Err() != nil {
 			// A server that asks for a longer wait than MaxRetryAfter fails

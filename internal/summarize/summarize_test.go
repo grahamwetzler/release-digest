@@ -463,3 +463,22 @@ func TestSummarizedNeedsTheTickConfirmation(t *testing.T) {
 		t.Errorf("Summarized = %v, %v while confirmed", ok, err)
 	}
 }
+
+func TestLLMRetriesAreGated(t *testing.T) {
+	h := newHarness(t)
+	h.add("o/r", "v1", store.StatePending, t0)
+	h.fake.Queue(llmtest.Reply{Status: 503, Message: "busy"})
+	first := true
+	h.s.Gate = func(ctx context.Context, repo string) (bool, error) {
+		ok := first // the repo turns private during the first request
+		first = false
+		return ok, nil
+	}
+	h.pass()
+	if n := len(h.fake.Requests()); n != 1 {
+		t.Errorf("%d LLM requests; the retry must not be sent", n)
+	}
+	if r := h.get("o/r", "v1"); r.State != store.StatePending || r.Attempts != 0 {
+		t.Errorf("state %s, attempts %d", r.State, r.Attempts)
+	}
+}

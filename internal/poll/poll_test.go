@@ -1023,3 +1023,29 @@ func TestEditedOldNoNotesReleaseIsResolved(t *testing.T) {
 		t.Errorf("after the retry: %+v, notes %q", r, text)
 	}
 }
+
+func TestFailedJustInTimeCheckIsLatchedForTheTick(t *testing.T) {
+	h := newHarness(t, "repos: [{repo: o/r}]")
+	repo := h.gh.Repo("o/r")
+	id, _ := h.p.NextTick(h.ctx)
+	h.p.Sweep(h.ctx, id)
+	repo.Private = true
+	if ok, err := h.p.CheckNow(h.ctx, "o/r", id, "test"); ok || err != nil {
+		t.Fatalf("CheckNow = %v, %v for a private repo", ok, err)
+	}
+	// A public answer recorded later in the tick (say, to a request sent
+	// before the failing one) doesn't restore the confirmation.
+	repo.Private = false
+	if ok, err := h.p.CheckNow(h.ctx, "o/r", id, "test"); ok || err != nil {
+		t.Errorf("CheckNow = %v, %v after a failure in the same tick", ok, err)
+	}
+	if ok, _ := h.st.Confirmed(h.ctx, "o/r", id); ok {
+		t.Error("the confirmation was restored within the tick")
+	}
+	// The next tick starts clean.
+	next, _ := h.p.NextTick(h.ctx)
+	h.p.Sweep(h.ctx, next)
+	if ok, err := h.p.CheckNow(h.ctx, "o/r", next, "test"); !ok || err != nil {
+		t.Errorf("CheckNow = %v, %v in the next tick", ok, err)
+	}
+}

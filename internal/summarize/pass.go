@@ -60,13 +60,23 @@ var ErrNotPublic = errors.New("the repo is no longer confirmed public")
 
 // Summarize asks the LLM to summarize in, allowing one repair retry for an
 // invalid reply. It touches neither the store nor the gate: callers check
-// visibility before calling it, and recheck, if set, runs before the repair
-// request, since the first call can take minutes (§3.1). A failed recheck
-// returns ErrNotPublic.
+// visibility before calling it, and recheck, if set, runs before every
+// later HTTP request: the client's retries and format fallbacks, and the
+// repair request. A call can take minutes (§3.1). A failed recheck returns
+// ErrNotPublic.
 func (s *Summarizer) Summarize(ctx context.Context, prompt string, in Input, recheck func(context.Context) (bool, error)) (*Result, error) {
 	msgs := Messages(prompt, in)
 	res := &Result{Key: Key(s.endpoint(), msgs), Messages: msgs}
 	req := llm.Request{Messages: msgs, Name: "release_summary", Schema: Schema}
+	if recheck != nil {
+		req.Before = func(ctx context.Context) error {
+			public, err := recheck(ctx)
+			if err == nil && !public {
+				err = ErrNotPublic
+			}
+			return err
+		}
+	}
 	resp, err := s.LLM.Complete(ctx, req)
 	if err != nil {
 		return nil, err
@@ -74,11 +84,9 @@ func (s *Summarizer) Summarize(ctx context.Context, prompt string, in Input, rec
 	res.TokensIn, res.TokensOut = resp.TokensIn, resp.TokensOut
 	sum, perr := Parse(resp.Content)
 	if perr != nil {
-		if recheck != nil {
-			if public, err := recheck(ctx); err != nil {
+		if req.Before != nil {
+			if err := req.Before(ctx); err != nil {
 				return nil, err
-			} else if !public {
-				return nil, ErrNotPublic
 			}
 		}
 		req.Messages = append(append([]llm.Message(nil), msgs...),

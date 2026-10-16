@@ -195,15 +195,17 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 	}
 	in := Input{Repo: r.Repo, Tag: r.Tag, PrevTag: r.PrevTag, Source: r.NotesSource, Notes: text}
 	key := Key(s.endpoint(), Messages(prompt, in))
+	if !r.Resummarize.IsZero() {
+		// A resummary has its own key, so the published summary, which the
+		// feed reads through the row's summary_key, stays as it is until
+		// Summarized switches the row after the final gate. One stored by
+		// an earlier attempt whose publication was gated is found again
+		// under the same key, so it costs no second call.
+		key = ResummaryKey(key, r.Resummarize)
+	}
 	cached, err := s.Store.Summary(ctx, key)
 	if err != nil {
 		return false, err
-	}
-	// A resummarize asks for a summary made after the request: an older
-	// cached one doesn't count, but one stored by an earlier attempt whose
-	// publication was gated does, so it costs no second call.
-	if cached != nil && cached.Created.Before(r.Resummarize) {
-		cached = nil
 	}
 	if public, err := s.Gate(ctx, r.Repo); err != nil || !public {
 		return false, err
@@ -227,13 +229,9 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 				"repo", r.Repo, "tag", r.Tag, "attempts", r.Attempts+1, "err", err)
 			return false, s.Store.SummaryFailed(ctx, r.Repo, r.Tag, err.Error(), s.now())
 		}
-		cached = &store.Summary{Key: res.Key, Model: s.LLM.Model, JSON: res.Summary.Encode(), Created: s.now(),
+		cached = &store.Summary{Key: key, Model: s.LLM.Model, JSON: res.Summary.Encode(), Created: s.now(),
 			TokensIn: res.TokensIn, TokensOut: res.TokensOut}
-		put := s.Store.PutSummary
-		if !r.Resummarize.IsZero() {
-			put = s.Store.ReplaceSummary
-		}
-		if err := put(ctx, cached); err != nil {
+		if err := s.Store.PutSummary(ctx, cached); err != nil {
 			return false, err
 		}
 		// The call can take minutes: check again before publishing, in case

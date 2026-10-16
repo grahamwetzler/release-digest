@@ -53,23 +53,13 @@ func (s ops) PutSummary(ctx context.Context, sum *Summary) error {
 	return err
 }
 
-// ReplaceSummary stores a summary, replacing one stored under its key: a
-// resummarize asked for a fresh answer to the same request (§3.3).
-func (s ops) ReplaceSummary(ctx context.Context, sum *Summary) error {
-	_, err := s.q.ExecContext(ctx, `INSERT INTO summaries (key, model, json, created_at, tokens_in, tokens_out)
-		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET model = excluded.model, json = excluded.json,
-		created_at = excluded.created_at, tokens_in = excluded.tokens_in, tokens_out = excluded.tokens_out`,
-		sum.Key, sum.Model, sum.JSON, toMS(sum.Created), sum.TokensIn, sum.TokensOut)
-	return err
-}
-
 // RequestResummarize flags the releases that resummarize names (§3.3):
 // summarized, fallback or pending rows published at or after since, in
 // repo if it isn't "", and not deleted. Each records the request time now
-// and is due at once with its backoff reset. Only a summary created after
-// now satisfies the request, so the cache is bypassed until one exists.
-// A summarized row keeps its summary until the new one is published. It
-// returns the flagged rows.
+// and is due at once with its backoff reset. The summarize stage answers
+// it with a fresh call stored under its own key, so a summarized row keeps
+// its published summary until the new one is published. It returns the
+// flagged rows.
 func (s *Store) RequestResummarize(ctx context.Context, repo string, since, now time.Time) ([]*Release, error) {
 	var out []*Release
 	err := s.Tx(ctx, func(tx *Tx) error {

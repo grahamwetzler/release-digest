@@ -36,7 +36,7 @@ The design, including every state transition and failure mode, is in
    mkdir -p secrets && chmod 700 secrets
    printf '%s' 'sk-or-v1-…' > secrets/llm_api_key      # your OpenRouter key
    printf '%s' 'github_pat_…' > secrets/github_token   # see "GitHub token" below
-   sudo chown 65532 secrets/* && chmod 400 secrets/*   # the container's nonroot user
+   chmod 400 secrets/* && sudo chown 65532 secrets/*   # readable only by the container's nonroot user
    ```
 
    `secrets/` is in `.gitignore` and `.dockerignore`, so keys can't be

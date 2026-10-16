@@ -565,7 +565,7 @@ func TestResummarize(t *testing.T) {
 	for _, tag := range []string{"v1", "fb"} {
 		r := h.get("o/r", tag)
 		sum, _ := h.st.Summary(ctx, r.SummaryKey)
-		if r.State != store.StateSummarized || !r.Resummarize.IsZero() || r.SummaryKey != key(tag) || sum == nil || !strings.Contains(sum.JSON, "Fresh summary") {
+		if r.State != store.StateSummarized || !r.Resummarize.IsZero() || r.SummaryKey != ResummaryKey(key(tag), t0) || sum == nil || !strings.Contains(sum.JSON, "Fresh summary") {
 			t.Errorf("%s: state %s, flag %v, summary %+v", tag, r.State, r.Resummarize, sum)
 		}
 	}
@@ -615,6 +615,13 @@ func TestGatedResummaryIsNotPaidForTwice(t *testing.T) {
 	h.pass()
 	if r := h.get("o/r", "v1"); r.Resummarize.IsZero() || r.Attempts != 0 {
 		t.Fatalf("gated: flag %v, attempts %d; want still requested, not a failure", r.Resummarize, r.Attempts)
+	}
+	// The feed reads the published summary, which the gated answer mustn't touch.
+	if r := h.get("o/r", "v1"); r.SummaryKey != key {
+		t.Errorf("gated: summary_key moved to %q", r.SummaryKey)
+	}
+	if sum, _ := h.st.Summary(ctx, key); sum == nil || !strings.Contains(sum.JSON, "Adds streaming") {
+		t.Errorf("gated: the published summary changed: %+v", sum)
 	}
 
 	h.deny.Store(false)

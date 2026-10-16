@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"release-digest/internal/llm"
@@ -201,4 +203,11 @@ func Key(e Endpoint, msgs []llm.Message) string {
 	b, _ := json.Marshal(doc)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// ResummaryKey is where a resummarize's answer to the request keyed key is
+// stored (§3.3): apart from the summary already published under key, and
+// one per resummarize request.
+func ResummaryKey(key string, requested time.Time) string {
+	return key + "@resummarize-" + strconv.FormatInt(requested.UnixMilli(), 10)
 }

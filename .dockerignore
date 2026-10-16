@@ -4,6 +4,7 @@ bin
 out
 secrets
 compose.override.yaml
+config
 *.db
 *.db-wal
 *.db-shm

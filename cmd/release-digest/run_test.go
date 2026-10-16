@@ -161,11 +161,11 @@ func TestConfigLintReportsSourcesNotValues(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp_secretvalue")
 	t.Setenv("RELEASE_DIGEST_REPOS", "astral-sh/uv")
 	var out, errb bytes.Buffer
-	if code := run([]string{"config", "lint", "--offline", "--config", writeConfig(t, "llm: {model: m}\n")}, &out, &errb); code != 0 {
+	if code := run([]string{"config", "lint", "--offline", "--config", writeConfig(t, "llm: {model: m}\nrepos: [{repo: o/r, instructions: Lead with CLI changes.}]\n")}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	s := out.String()
-	for _, want := range []string{"1 repo(s)", "astral-sh/uv (RELEASE_DIGEST_REPOS)", "github token: env GITHUB_TOKEN",
+	for _, want := range []string{"2 repo(s)", "astral-sh/uv (RELEASE_DIGEST_REPOS)\n", "o/r (yaml, instructions: 22 characters)", "github token: env GITHUB_TOKEN",
 		"llm api key: none", "warning: llm.base_url https://openrouter.ai/api/v1 is not a local address"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in:\n%s", want, s)

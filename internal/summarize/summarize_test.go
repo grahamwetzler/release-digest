@@ -30,12 +30,13 @@ func TestKey(t *testing.T) {
 	}
 	vary := map[string]string{}
 	add := func(name string, e Endpoint, prompt string, in Input) { vary[name] = Key(e, Messages(prompt, in)) }
-	add("repo", e, DefaultPrompt, Input{"o/x", "v2", "v1", "release_body", "notes"})
-	add("version", e, DefaultPrompt, Input{"o/r", "v3", "v1", "release_body", "notes"})
-	add("prev_tag", e, DefaultPrompt, Input{"o/r", "v2", "v0", "release_body", "notes"})
-	add("no prev_tag", e, DefaultPrompt, Input{"o/r", "v2", "", "release_body", "notes"})
-	add("source", e, DefaultPrompt, Input{"o/r", "v2", "v1", "changelog", "notes"})
-	add("notes", e, DefaultPrompt, Input{"o/r", "v2", "v1", "release_body", "notes!"})
+	add("repo", e, DefaultPrompt, Input{Repo: "o/x", Tag: "v2", PrevTag: "v1", Source: "release_body", Notes: "notes"})
+	add("version", e, DefaultPrompt, Input{Repo: "o/r", Tag: "v3", PrevTag: "v1", Source: "release_body", Notes: "notes"})
+	add("prev_tag", e, DefaultPrompt, Input{Repo: "o/r", Tag: "v2", PrevTag: "v0", Source: "release_body", Notes: "notes"})
+	add("no prev_tag", e, DefaultPrompt, Input{Repo: "o/r", Tag: "v2", PrevTag: "", Source: "release_body", Notes: "notes"})
+	add("source", e, DefaultPrompt, Input{Repo: "o/r", Tag: "v2", PrevTag: "v1", Source: "changelog", Notes: "notes"})
+	add("notes", e, DefaultPrompt, Input{Repo: "o/r", Tag: "v2", PrevTag: "v1", Source: "release_body", Notes: "notes!"})
+	add("instructions", e, DefaultPrompt, Input{Repo: "o/r", Tag: "v2", PrevTag: "v1", Source: "release_body", Notes: "notes", Instructions: "CLI only"})
 	add("prompt", e, DefaultPrompt+" ", in)
 	add("model", Endpoint{e.BaseURL, "m2", 0.2}, DefaultPrompt, in)
 	add("base_url", Endpoint{"http://ollama:11434/v1", "m", 0.2}, DefaultPrompt, in)
@@ -360,6 +361,31 @@ func TestPromptFileChangesTheKey(t *testing.T) {
 	def := Key(h.s.endpoint(), Messages(DefaultPrompt, Input{Repo: "o/r", Tag: "v1", Source: "release_body", Notes: "notes for v1"}))
 	if h.get("o/r", "v1").SummaryKey == def {
 		t.Error("the prompt file's contents are not in the key")
+	}
+}
+
+func TestInstructionsReachTheRequest(t *testing.T) {
+	h := newHarness(t)
+	own := "Lead with CLI changes."
+	opts := h.s.Cfg.Defaults
+	opts.Instructions = &own
+	h.s.Cfg.Repos = append(h.s.Cfg.Repos, &config.Repo{Repo: "O/R", RepoOptions: opts})
+	h.confirm("o/q")
+	h.add("o/r", "v1", store.StatePending, t0)
+	h.add("o/q", "v1", store.StatePending, t0)
+	h.pass()
+	users := map[string]string{}
+	for _, r := range h.fake.Requests() {
+		u := r.Messages[1].Content
+		users[strings.SplitN(strings.TrimPrefix(u, "Repository: "), "\n", 2)[0]] = u
+	}
+	r := users["o/r"]
+	block := "<instructions>\nLead with CLI changes.\n</instructions>"
+	if i, n := strings.Index(r, block), strings.Index(r, "<notes>"); i < 0 || n < i || !strings.Contains(r, "security_urgency") {
+		t.Errorf("o/r request:\n%s", r)
+	}
+	if q, ok := users["o/q"]; !ok || strings.Contains(q, "instructions") {
+		t.Errorf("o/q request (no instructions configured):\n%s", q)
 	}
 }
 

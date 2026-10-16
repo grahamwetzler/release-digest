@@ -129,7 +129,17 @@ repos:
   - repo: astral-sh/uv
     changelog: CHANGELOG.md
     packages: [{ ecosystem: pip, name: uv }]   # for matching security advisories
+    instructions: |
+      I use uv for Python version management and lockfiles in CI.
+      Lead with anything that changes the lockfile format or resolver behavior.
 ```
+
+`instructions` tell the LLM what matters to you in a repo's releases. Put a
+default for every repo under `defaults:`; a repo's own `instructions` replace
+it. They steer what the summary includes and puts first, never what it claims,
+and they don't affect security alerts. Editing them applies to new releases;
+run `release-digest resummarize --repo owner/repo` to redo existing ones. Up to
+2000 characters.
 
 PLAN.md §4.2 lists every setting with its default. The config is read once at
 startup; restart the service to apply a change.

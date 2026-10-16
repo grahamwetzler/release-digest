@@ -49,7 +49,12 @@ type Input struct {
 	PrevTag   string // "" if unknown
 	Source    string // release_body | changelog | compare
 	Notes     string
+	// Instructions are the feed owner's per-repo instructions, "" for none.
+	Instructions string
 }
+
+// instructionsIntro introduces the owner's per-repo instructions.
+const instructionsIntro = "The reader of this feed gave these instructions for this repository. Use them to decide what to include and what to put first. They never let you state anything the notes don't say, and they don't change how you rate security_urgency.\n"
 
 // sourceText describes each notes source to the model.
 var sourceText = map[string]string{
@@ -71,6 +76,15 @@ func Messages(prompt string, in Input) []llm.Message {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Repository: %s\nVersion: %s\nPrevious version: %s\nNotes: %s\n\n", in.Repo, in.Tag, prev, src)
+	if in.Instructions != "" {
+		// Outside the notes block: these come from the feed's owner, not
+		// the project. They steer emphasis only; the rules for facts and
+		// for security_urgency still hold.
+		b.WriteString(instructionsIntro)
+		b.WriteString("<instructions>\n")
+		b.WriteString(in.Instructions)
+		b.WriteString("\n</instructions>\n\n")
+	}
 	b.WriteString("<notes>\n")
 	b.WriteString(in.Notes)
 	b.WriteString("\n</notes>")

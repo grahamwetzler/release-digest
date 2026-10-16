@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -508,6 +509,10 @@ func (v *validator) defaults(d *RepoOptions) {
 		s := DefaultChangelog
 		d.Changelog = &s
 	}
+	if d.Instructions == nil {
+		s := ""
+		d.Instructions = &s
+	}
 	v.repoOptions(at, d, nil)
 }
 
@@ -537,6 +542,9 @@ func (v *validator) repoOptions(at []any, o *RepoOptions, def *RepoOptions) {
 		}
 		if o.PrereleasePattern == nil {
 			o.PrereleasePattern = def.PrereleasePattern
+		}
+		if o.Instructions == nil {
+			o.Instructions = def.Instructions
 		}
 		// packages are per repo and never inherited: they name what one repo publishes.
 	}
@@ -572,6 +580,13 @@ func (v *validator) repoOptions(at []any, o *RepoOptions, def *RepoOptions) {
 			}
 		}
 	}
+	if o.Instructions != nil {
+		s := strings.TrimSpace(*o.Instructions)
+		if n := utf8.RuneCountInString(s); n > MaxInstructions {
+			v.err(append(at, "instructions"), "is %d characters; the limit is %d", n, MaxInstructions)
+		}
+		o.Instructions = &s
+	}
 	for i, pk := range o.Packages {
 		if !slices.Contains(ecosystems, pk.Ecosystem) {
 			v.err(append(at, "packages", i, "ecosystem"), "must be one of %s, got %q", strings.Join(ecosystems, ", "), pk.Ecosystem)
@@ -580,6 +595,17 @@ func (v *validator) repoOptions(at []any, o *RepoOptions, def *RepoOptions) {
 			v.err(append(at, "packages", i, "name"), "is required")
 		}
 	}
+}
+
+// Options returns the effective options of the repo named name (owner/repo,
+// lowercased), or the defaults for a repo that isn't configured.
+func (c *Config) Options(name string) RepoOptions {
+	for _, r := range c.Repos {
+		if r.Name() == name {
+			return r.RepoOptions
+		}
+	}
+	return c.Defaults
 }
 
 // Name is the repo's key: owner/repo, lowercased (§5).

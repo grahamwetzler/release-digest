@@ -217,3 +217,43 @@ func TestParseDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestInstructions(t *testing.T) {
+	c, err := Load(write(t, minimal+`
+defaults:
+  instructions: "  Only Linux matters to me.\n"
+repos:
+  - repo: o/inherits
+  - repo: o/own
+    instructions: |
+      Lead with CLI changes.
+  - repo: o/none
+    instructions: ""
+`), envOf(map[string]string{EnvRepos: "o/env"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"o/inherits": "Only Linux matters to me.",
+		"o/own":      "Lead with CLI changes.",
+		"o/none":     "",
+		"o/env":      "Only Linux matters to me.",
+		"o/unlisted": "Only Linux matters to me.",
+	} {
+		if got := *c.Options(name).Instructions; got != want {
+			t.Errorf("%s: instructions %q, want %q", name, got, want)
+		}
+	}
+	if c, err := Load(write(t, minimal), envOf(nil)); err != nil || *c.Defaults.Instructions != "" {
+		t.Errorf("default instructions: %v", err)
+	}
+
+	long := strings.Repeat("é", MaxInstructions+1)
+	_, err = Load(write(t, minimal+"repos:\n  - repo: o/r\n    instructions: "+long+"\n"), envOf(nil))
+	if err == nil || !strings.Contains(err.Error(), "repos[0].instructions: is 2001 characters; the limit is 2000") {
+		t.Errorf("err = %v", err)
+	}
+	if _, err := Load(write(t, minimal+"repos:\n  - repo: o/r\n    instructions: "+long[2:]+"\n"), envOf(nil)); err != nil {
+		t.Errorf("exactly the limit: %v", err)
+	}
+}

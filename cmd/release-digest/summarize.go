@@ -145,12 +145,7 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 	if !vis.Public {
 		return in, nil, "", fmt.Errorf("%s is private or not found; only public repos are summarized", repo)
 	}
-	opts := cfg.Defaults
-	for _, r := range cfg.Repos {
-		if r.Name() == repo {
-			opts = r.RepoOptions
-		}
-	}
+	opts := cfg.Options(repo)
 	var pre *regexp.Regexp
 	if opts.PrereleasePattern != nil {
 		pre = opts.PrereleasePattern.Re
@@ -231,7 +226,8 @@ func dryRunNotes(ctx context.Context, gh *github.Client, cfg *config.Config, rep
 		return in, nil, "", fmt.Errorf("resolving notes: %w", err)
 	}
 	row.NotesSource = out.Source
-	return summarize.Input{Repo: repo, Tag: tag, PrevTag: row.PrevTag, Source: out.Source, Notes: out.Text}, row, warn, nil
+	return summarize.Input{Repo: repo, Tag: tag, PrevTag: row.PrevTag, Source: out.Source, Notes: out.Text,
+		Instructions: *opts.Instructions}, row, warn, nil
 }
 
 // MaxDateLookups bounds the tag date lookups for a date-ordered tag's

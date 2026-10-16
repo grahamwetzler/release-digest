@@ -86,6 +86,9 @@ type RepoOptions struct {
 	ExcludePattern     *Regex    `yaml:"exclude_pattern"`
 	PrereleasePattern  *Regex    `yaml:"prerelease_pattern"`
 	Packages           []Package `yaml:"packages"`
+	// Instructions tell the LLM what matters to you in this repo's
+	// releases (§3.3). A repo's own value, even "", replaces the default's.
+	Instructions *string `yaml:"instructions"`
 }
 
 // Package names a published package for advisory matching (§3.4).
@@ -124,6 +127,7 @@ const (
 	DefaultBackfill        = 3
 	DefaultMaxPages        = 5
 	DefaultChangelog       = "auto"
+	MaxInstructions        = 2000 // characters
 )
 
 var (

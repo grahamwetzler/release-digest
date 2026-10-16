@@ -193,7 +193,8 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 	if err != nil {
 		return false, err
 	}
-	in := Input{Repo: r.Repo, Tag: r.Tag, PrevTag: r.PrevTag, Source: r.NotesSource, Notes: text}
+	in := Input{Repo: r.Repo, Tag: r.Tag, PrevTag: r.PrevTag, Source: r.NotesSource, Notes: text,
+		Instructions: *s.Cfg.Options(r.Repo).Instructions}
 	key := Key(s.endpoint(), Messages(prompt, in))
 	if !r.Resummarize.IsZero() {
 		// A resummary has its own key, so the published summary, which the

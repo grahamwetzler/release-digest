@@ -25,7 +25,8 @@ func TestSummarizeDryRun(t *testing.T) {
 	gh.Repo("o/secret").Private = true
 	ai := llmtest.New(`{"headline":"Starts faster","breaking":[],"features":[],"fixes":["Faster startup"],"security":[],"noise_only":false,"security_urgency":"none","security_reason":""}`)
 	defer ai.Close()
-	cfg := writeConfig(t, "github: {api_url: "+gh.URL+"}\nllm: {base_url: "+ai.URL()+", model: test/model}\n")
+	cfg := writeConfig(t, "github: {api_url: "+gh.URL+"}\nllm: {base_url: "+ai.URL()+", model: test/model}\n"+
+		"repos: [{repo: o/r, instructions: Lead with startup time.}]\n")
 	t.Setenv("GITHUB_TOKEN", "ghp_x")
 
 	var out, errb bytes.Buffer
@@ -37,6 +38,7 @@ func TestSummarizeDryRun(t *testing.T) {
 		"notes: release_body",
 		"--- system ---",
 		"Previous version: v1.0.0",
+		"<instructions>\nLead with startup time.\n</instructions>",
 		`"headline": "Starts faster"`,
 		"title: o/r v1.1.0 — Starts faster",
 		"Summarized by test/model from the release notes.",

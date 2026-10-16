@@ -215,12 +215,13 @@ The resolved text is stored once in `notes`, keyed by its SHA-256, and the relea
   ```
   The urgency fields of §3.4 (`security_urgency`, `security_reason`) join the schema in milestone 5 as schema version 2. Each list is capped at 6 entries. The prompt says to omit dependency bumps, CI or docs-only changes, and contributor thank-yous. `noise_only: true` means "nothing user-facing", which renders as a one-line item instead of being hidden, so the feed still shows the version shipped.
 - **Prompt:** a built-in default system prompt ships in the binary, and `llm.prompt_file` replaces it. The file is re-read at the start of every summarize stage, so an edit applies on the next tick. The user message gets the repo, the tag, the previous tag (or "unknown"), the notes source and the notes, inside a `<notes>` block. The system prompt tells the model the notes are data, not instructions.
+- **Per-repo instructions:** a repo's `instructions` (or the one in `defaults`; a repo's own value, even `""`, replaces it) tell the model what matters to the feed's owner, such as "lead with CLI changes". They go in the user message, in an `<instructions>` block before the notes and outside them, introduced as the reader's instructions for that repo. The introduction limits them to choosing what to include and what to put first: they never allow claims the notes don't make, and they don't change how `security_urgency` is rated. The advisory signal and the alert rules (§3.4) don't read them. They're part of the request, so they're in the cache key: an edit applies to future summaries, and `resummarize --repo` redoes existing ones. They come from the config, so they're trusted; the limit is 2000 characters, trimmed. `config lint` lists which repos have them.
 - **No model, no summaries:** an empty `llm.model` turns the summarize stage off. The feed then shows excerpts only, through the same `fallback` path as milestone 2, and startup logs a warning.
 - **Caching:** the summary key is the SHA-256 of a canonical JSON document holding everything that shapes the output:
   - `base_url` and `model`
   - `temperature`
   - the response schema version
-  - the **fully rendered request messages**, which embed the effective prompt text (built-in or the *contents* of `prompt_file`), the repo, the version, `prev_tag`, the notes source and the notes themselves
+  - the **fully rendered request messages**, which embed the effective prompt text (built-in or the *contents* of `prompt_file`), the repo, the version, `prev_tag`, the repo's `instructions`, the notes source and the notes themselves
 
   Two releases share a summary only if the LLM would have seen byte-identical requests. Editing `prompt_file` or switching model changes the key for *future* summaries. The scheduler only summarizes releases that are eligible (see the state table below), so published `summarized` items aren't re-billed. `release-digest resummarize` forces it.
 - **Concurrency and retries:** `llm.concurrency` (default 2). Within one attempt, the client retries 429 and 5xx up to 3 times with jittered exponential backoff, waiting at least as long as `Retry-After` (seconds or an HTTP date). A server that asks for more than a minute fails the attempt instead, and the backoff below takes over. Errors are redacted with the key the request was sent with, so a SIGHUP rotation mid-request can't leak the old key. A failed attempt increments `attempts` and records `last_error`. It also sets `next_attempt_at = now + min(15m × 2^attempts, 24h)`, counting the attempts before this one, so the first failure waits 15m. A broken LLM therefore isn't hammered every tick. Backoff state is persisted and survives restarts. A success resets `attempts` and `last_error`. A call cut short by shutdown is not counted as a failure.
@@ -445,6 +446,7 @@ defaults:                                  # applied to every repo
   max_pages: 5                             # catch-up pagination cap (§3.1)
   changelog: auto                          # or a path, or "off"
   # prerelease_pattern: overrides the default tag classifier (§3.1.1)
+  # instructions: what matters to you, for the LLM (§3.3); a repo's own replaces it
 
 repos:
   - repo: golang/go
@@ -457,6 +459,7 @@ repos:
     changelog: CHANGELOG.md
     packages:                              # advisory matching when names differ (§3.4)
       - { ecosystem: pip, name: uv }
+    instructions: Lead with lockfile and resolver changes; I use uv in CI.
 ```
 
 ### 4.3 Secrets
@@ -729,7 +732,7 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   - a repo's first version
 - **notes:** table tests over real changelog fixtures with different heading styles (Keep a Changelog, `## v1.2.3 (2026-01-01)`, `# [1.2.3](link)`, setext `===`/`---`) and the "see changelog" heuristics. Also the compare-fallback edge cases: no predecessor, 404, diverged or too large, all noise → `no_notes`.
 - **llm:** a fake OpenAI-compatible server that exercises the `json_schema` → `json_object` → prompt-only fallback, malformed JSON with a repair retry, 429 backoff and timeouts.
-- **summarize:** the cache key differs when only the repo, version, `prev_tag` or `prompt_file` *contents* differ, and matches for byte-identical requests. Also the state machine: `pending` → `fallback` at render time even while the LLM is down, `fallback` → `summarized` after the LLM recovers across a restart, keeping the GUID and pubDate. `next_attempt_at` backoff is persisted.
+- **summarize:** the cache key differs when only the repo, version, `prev_tag`, `instructions` or `prompt_file` *contents* differ, and matches for byte-identical requests. Also the state machine: `pending` → `fallback` at render time even while the LLM is down, `fallback` → `summarized` after the LLM recovers across a restart, keeping the GUID and pubDate. `next_attempt_at` backoff is persisted.
 - **scheduler:** with a fake GitHub that hangs and a fake LLM that fails, the tick still renders, expired fallbacks are published, and the next tick resumes polling at the cursor. With a fake GitHub that always uses all of `poll_budget`, summaries still complete every tick.
 - **ingest:** deleting entries *between page requests* of a scan causes a miss that the next daily reconciliation repairs. Reconciliation on a repo added with 40 releases in the last week leaves pre-`initialized_at` releases `skipped`. Tag rows stay hidden until their commit date resolves.
 - **notify:**

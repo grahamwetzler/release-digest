@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"release-digest/internal/config"
 	"release-digest/internal/github"
@@ -44,6 +45,9 @@ func cmdConfigLint(args []string, stdout, stderr io.Writer) int {
 		from := "yaml"
 		if r.FromEnv {
 			from = config.EnvRepos
+		}
+		if n := utf8.RuneCountInString(*r.Instructions); n > 0 {
+			from += fmt.Sprintf(", instructions: %d characters", n)
 		}
 		fmt.Fprintf(stdout, "  %s (%s)\n", r.Name(), from)
 	}

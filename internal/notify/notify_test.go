@@ -208,7 +208,7 @@ func (h *harness) summarize(r *store.Release, s summarize.Summary) {
 	if err := h.st.PutSummary(ctx, &store.Summary{Key: key, Model: "m", JSON: s.Encode(), Created: h.now}); err != nil {
 		h.t.Fatal(err)
 	}
-	ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, h.now, h.tick, h.now)
+	ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, time.Time{}, h.tick, h.now)
 	if err != nil || !ok {
 		h.t.Fatalf("Summarized: %v, %v", ok, err)
 	}
@@ -849,7 +849,8 @@ func TestResummarizeNeverResends(t *testing.T) {
 		{Headline: "Parser hardening", Security: []string{"Hardens the parser"}, SecurityUrgency: "none"},
 		{Headline: "Fixes RCE again", Security: []string{"Fix remote code execution"}, SecurityUrgency: "urgent", SecurityReason: "RCE"},
 	} {
-		if _, err := h.st.RequestResummarize(ctx, "o/r", time.Time{}, h.now); err != nil {
+		requested := h.now
+		if _, err := h.st.RequestResummarize(ctx, "o/r", time.Time{}, requested); err != nil {
 			t.Fatal(err)
 		}
 		h.nextTick(time.Hour)
@@ -858,7 +859,7 @@ func TestResummarizeNeverResends(t *testing.T) {
 		if err := h.st.PutSummary(ctx, &store.Summary{Key: key, Model: "m2", JSON: s.Encode(), Created: h.now}); err != nil {
 			t.Fatal(err)
 		}
-		if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, h.now, h.tick, h.now); err != nil || !ok {
+		if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, requested, h.tick, h.now); err != nil || !ok {
 			t.Fatalf("Summarized: %v, %v", ok, err)
 		}
 		h.pass()

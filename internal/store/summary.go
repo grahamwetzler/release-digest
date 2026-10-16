@@ -103,21 +103,22 @@ func (s ops) DueSummaries(ctx context.Context, tick int64, now time.Time, n int)
 
 // Summarized records a summary on a pending or fallback row, or a
 // summarized row flagged by resummarize, whose notes are still notesHash,
-// publishing it if it was pending. created is when the summary was made:
-// it clears a resummarize request made at or before then, but not a later
-// one, which the next pass serves. The update is atomic
+// publishing it if it was pending. served is the resummarize request the
+// summary answers (zero for none): it is cleared only if it is still the
+// row's request, so one made during the call is kept for the next pass.
+// The update is atomic
 // with the gate: it applies only while the repo is confirmed for tick and
 // not held (§3.1). The new summary is an urgency input, so the row's
 // urgency is marked for recomputing (§3.4). It reports whether the row
 // changed; it doesn't if the notes changed or the confirmation was lost
 // meanwhile.
-func (s ops) Summarized(ctx context.Context, repo, tag, notesHash, key string, created time.Time, tick int64, at time.Time) (bool, error) {
+func (s ops) Summarized(ctx context.Context, repo, tag, notesHash, key string, served time.Time, tick int64, at time.Time) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE releases SET state = ?1, summary_key = ?2, attempts = 0, last_error = '',
-		content_updated_at = ?3, urgency_dirty = 1, resummarize = CASE WHEN resummarize <= ?4 THEN 0 ELSE resummarize END
+		content_updated_at = ?3, urgency_dirty = 1, resummarize = CASE WHEN resummarize = ?4 THEN 0 ELSE resummarize END
 		WHERE repo = ?5 AND tag = ?6 AND notes_hash = ?7 AND (state IN (?8, ?9) OR (state = ?1 AND resummarize > 0))
 		AND EXISTS (SELECT 1 FROM repo_state rs WHERE rs.repo = releases.repo
 			AND rs.visibility_confirmed_tick = ?10 AND rs.held = 0)`,
-		StateSummarized, key, toMS(at), toMS(created), repo, tag, notesHash, StatePending, StateFallback, tick)
+		StateSummarized, key, toMS(at), msOrZero(served), repo, tag, notesHash, StatePending, StateFallback, tick)
 	if err != nil {
 		return false, err
 	}

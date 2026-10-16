@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -459,14 +460,14 @@ func TestSummarizedNeedsTheTickConfirmation(t *testing.T) {
 	r := h.add("o/r", "v1", store.StatePending, t0)
 	// Another worker's failed check invalidates the confirmation.
 	h.st.Visibility(ctx, "o/r", h.tick, false, false, t0, "boom")
-	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", t0, h.tick, t0); err != nil || ok {
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", time.Time{}, h.tick, t0); err != nil || ok {
 		t.Errorf("Summarized = %v, %v after the confirmation was lost", ok, err)
 	}
 	h.confirm("o/r")
-	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", t0, h.tick-1, t0); err != nil || ok {
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", time.Time{}, h.tick-1, t0); err != nil || ok {
 		t.Errorf("Summarized = %v, %v for a stale tick", ok, err)
 	}
-	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", t0, h.tick, t0); err != nil || !ok {
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", time.Time{}, h.tick, t0); err != nil || !ok {
 		t.Errorf("Summarized = %v, %v while confirmed", ok, err)
 	}
 }
@@ -654,11 +655,46 @@ func TestLaterRequestSurvivesAnEarlierSummary(t *testing.T) {
 	if _, err := h.st.RequestResummarize(ctx, "", time.Time{}, t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	// A summary created before the request, as by a pass already under way.
-	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", t0, h.tick, t0); err != nil || !ok {
+	// A summary from a pass that served no request, already under way.
+	if ok, err := h.st.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, "k", time.Time{}, h.tick, t0); err != nil || !ok {
 		t.Fatalf("Summarized: %v, %v", ok, err)
 	}
 	if got := h.get(r.Repo, r.Tag); got.State != store.StateSummarized || !got.Resummarize.Equal(t0.Add(time.Minute)) {
 		t.Errorf("state %s, request %v; want summarized and still requested", got.State, got.Resummarize)
+	}
+}
+
+// A second resummarize during the first one's call survives it, and gets a
+// call of its own.
+func TestSecondRequestDuringTheCall(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	r := h.addKeyed("o/r", "v1", store.StateSummarized, "old", t0.Add(-time.Hour))
+	h.st.PutSummary(ctx, &store.Summary{Key: "old", Model: "test/model", JSON: good, Created: t0.Add(-time.Hour)})
+	if _, err := h.st.RequestResummarize(ctx, "", time.Time{}, t0); err != nil {
+		t.Fatal(err)
+	}
+	second := t0.Add(time.Second)
+	var once atomic.Bool
+	h.fake.SetDefault(func(llmtest.Request) llmtest.Reply {
+		if !once.Swap(true) {
+			if _, err := h.st.RequestResummarize(ctx, "", time.Time{}, second); err != nil {
+				t.Error(err)
+			}
+		}
+		return llmtest.Reply{Content: good}
+	})
+	h.now = t0.Add(time.Minute) // the first answer is created after the second request
+	h.pass()
+	got := h.get(r.Repo, r.Tag)
+	if !got.Resummarize.Equal(second) || got.SummaryKey == "old" {
+		t.Fatalf("after the first call: request %v, key %q; want the first published and the second kept", got.Resummarize, got.SummaryKey)
+	}
+	h.pass()
+	if n := len(h.fake.Requests()); n != 2 {
+		t.Errorf("%d LLM requests, want one per request", n)
+	}
+	if got := h.get(r.Repo, r.Tag); !got.Resummarize.IsZero() || !strings.HasSuffix(got.SummaryKey, "-"+strconv.FormatInt(second.UnixMilli(), 10)) {
+		t.Errorf("after the second call: request %v, key %q", got.Resummarize, got.SummaryKey)
 	}
 }

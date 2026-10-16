@@ -243,7 +243,7 @@ func (s *Summarizer) one(ctx context.Context, tick int64, prompt string, r *stor
 	}
 	// Conditional on the repo's confirmation for this tick, atomically: a
 	// concurrent worker's failed check for the same repo stops it (§3.1).
-	ok, err := s.Store.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, cached.Created, tick, s.now())
+	ok, err := s.Store.Summarized(ctx, r.Repo, r.Tag, r.NotesHash, key, r.Resummarize, tick, s.now())
 	if err == nil && ok {
 		s.Log.Info("summarized", "repo", r.Repo, "tag", r.Tag, "reused", reused, "resummarized", !r.Resummarize.IsZero(), "tokens_in", cached.TokensIn, "tokens_out", cached.TokensOut)
 	}

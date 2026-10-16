@@ -150,10 +150,11 @@ func (s ops) SetPrevTag(ctx context.Context, repo, tag, prev string) error {
 }
 
 // Seen records that tags appeared in a list response, which clears any
-// missing_since (§3.1, deletion detection).
+// missing_since (§3.1, deletion detection) and marks the urgency for
+// recomputing.
 func (s ops) Seen(ctx context.Context, repo string, tags []string) error {
 	for _, tag := range tags {
-		if _, err := s.q.ExecContext(ctx, `UPDATE releases SET missing_since = NULL
+		if _, err := s.q.ExecContext(ctx, `UPDATE releases SET missing_since = NULL, urgency_dirty = 1
 			WHERE repo = ? AND tag = ? AND missing_since IS NOT NULL`, repo, tag); err != nil {
 			return err
 		}
@@ -324,13 +325,17 @@ const (
 
 // RecordVerify records an existence check. Found clears missing_since; not
 // found sets it (keeping an earlier time); a failure only records the attempt.
+// A change of missing_since marks the urgency for recomputing: a deleted
+// release never alerts (§3.4).
 func (s ops) RecordVerify(ctx context.Context, repo, tag string, outcome int, at time.Time) error {
 	var q string
 	switch outcome {
 	case VerifyFound:
-		q = `UPDATE releases SET verify_attempted_at = ?1, last_verified_at = ?1, missing_since = NULL WHERE repo = ?2 AND tag = ?3`
+		q = `UPDATE releases SET verify_attempted_at = ?1, last_verified_at = ?1, missing_since = NULL,
+			urgency_dirty = CASE WHEN missing_since IS NOT NULL THEN 1 ELSE urgency_dirty END WHERE repo = ?2 AND tag = ?3`
 	case VerifyNotFound:
-		q = `UPDATE releases SET verify_attempted_at = ?1, missing_since = COALESCE(missing_since, ?1) WHERE repo = ?2 AND tag = ?3`
+		q = `UPDATE releases SET verify_attempted_at = ?1, missing_since = COALESCE(missing_since, ?1),
+			urgency_dirty = CASE WHEN missing_since IS NULL THEN 1 ELSE urgency_dirty END WHERE repo = ?2 AND tag = ?3`
 	default:
 		q = `UPDATE releases SET verify_attempted_at = ?1 WHERE repo = ?2 AND tag = ?3`
 	}

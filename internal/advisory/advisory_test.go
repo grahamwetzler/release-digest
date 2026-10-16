@@ -55,7 +55,9 @@ func TestTextFixes(t *testing.T) {
 		{"Bump foo to address CVE-2026-1234", false}, // the verb doesn't start the line
 		{"CVE-2026-1234 is not yet fixed", false},
 		{"Known issue: CVE-2026-1234 (fixed in 2.0)", false},
-		{"Fix CVE-2026-9999", false}, // another advisory
+		{"Fix CVE-2026-9999", false},                        // another advisory
+		{"Fix CVE-2026-12345", false},                       // a longer ID that starts the same
+		{"- Fix cve-2026-1234 (also CVE-2026-12345)", true}, // case-insensitive, whole ID
 	} {
 		if got := TextFixes("intro\n"+tc.line+"\nmore", id); got != tc.want {
 			t.Errorf("%q: %v, want %v", tc.line, got, tc.want)

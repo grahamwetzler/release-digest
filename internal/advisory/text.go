@@ -21,11 +21,24 @@ var (
 )
 
 // TextFixes reports whether notes affirm that this release fixes id: some
-// line mentioning id passes both the allowlist and the denylist.
+// line mentioning id passes both the allowlist and the denylist. A mention
+// is a whole advisory ID, so CVE-2026-12345 doesn't mention CVE-2026-1234.
 func TextFixes(notes, id string) bool {
 	for _, line := range strings.Split(notes, "\n") {
-		if strings.Contains(strings.ToUpper(line), strings.ToUpper(id)) && lineFixes(line) {
+		if mentions(line, Normalize(id)) && lineFixes(line) {
 			return true
+		}
+	}
+	return false
+}
+
+// mentions reports whether line contains the normalized advisory ID id.
+func mentions(line, id string) bool {
+	for _, re := range []*regexp.Regexp{ghsaID, cveID} {
+		for _, m := range re.FindAllString(line, -1) {
+			if Normalize(m) == id {
+				return true
+			}
 		}
 	}
 	return false

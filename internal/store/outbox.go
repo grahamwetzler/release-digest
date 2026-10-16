@@ -150,7 +150,9 @@ func (s *Store) Expire(ctx context.Context, now time.Time) ([]*Notification, err
 
 // Claim atomically moves the next due queued alert to sending and returns
 // it, or nil if none is due (§3.4). An alert waits while its release's
-// urgency is being recomputed or its repo is held.
+// urgency awaits a recompute (marked dirty, or notes not yet rescanned for
+// advisory IDs), while the release is confirmed deleted, and while its
+// repo is held.
 func (s *Store) Claim(ctx context.Context, now time.Time) (*Notification, error) {
 	var n *Notification
 	err := s.Tx(ctx, func(tx *Tx) error {
@@ -158,7 +160,8 @@ func (s *Store) Claim(ctx context.Context, now time.Time) (*Notification, error)
 		n, err = scanNotification(tx.q.QueryRowContext(ctx, `SELECT `+prefixedWith("n.", notificationColumns)+` FROM notifications n
 			JOIN releases r ON r.guid = n.guid
 			LEFT JOIN repo_state rs ON rs.repo = n.repo
-			WHERE n.state = ? AND n.next_attempt_at <= ? AND n.expires_at > ? AND r.urgency_dirty = 0 AND COALESCE(rs.held, 0) = 0
+			WHERE n.state = ? AND n.next_attempt_at <= ? AND n.expires_at > ? AND COALESCE(rs.held, 0) = 0
+			  AND r.urgency_dirty = 0 AND r.advisories_hash = r.notes_hash AND r.missing_since IS NULL
 			ORDER BY n.next_attempt_at, n.created_at, n.guid LIMIT 1`, AlertQueued, toMS(now), toMS(now)))
 		if errors.Is(err, sql.ErrNoRows) {
 			n = nil
@@ -175,10 +178,16 @@ func (s *Store) Claim(ctx context.Context, now time.Time) (*Notification, error)
 }
 
 // Sendable re-reads a claimed alert immediately before its POST (§3.4): it
-// returns the row if it is still sending with no cancel request, else nil.
+// returns the row if it is still sending with no cancel request and its
+// repo isn't held (another check may have found it private since the
+// worker's own), else nil.
 func (s ops) Sendable(ctx context.Context, guid string) (*Notification, error) {
 	n, err := s.Notification(ctx, guid)
 	if err != nil || n == nil || n.State != AlertSending || n.CancelRequested {
+		return nil, err
+	}
+	rs, err := s.RepoState(ctx, n.Repo)
+	if err != nil || rs.Held {
 		return nil, err
 	}
 	return n, nil

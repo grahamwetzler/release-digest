@@ -735,3 +735,67 @@ func TestNtfyErrorsDontLeakTheTopicOrToken(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestStaleAlertsWaitForRecompute(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (*harness, *store.Release) {
+		h := newHarness(t, "")
+		h.setAdvisory(ghsa, advisoryJSON(ghsa, "high", false))
+		r := h.add("o/r", "v1.2.3", "v1.2.2", store.StateFallback, fixNotes, time.Hour)
+		h.pass()
+		if n := h.alert(r); n == nil || n.State != store.AlertQueued {
+			t.Fatalf("alert = %+v", n)
+		}
+		return h, r
+	}
+	t.Run("held by another check after the worker's", func(t *testing.T) {
+		h, r := setup(t)
+		check := h.o.Check
+		h.o.Check = func(ctx context.Context, repo string) (github.Visibility, error) {
+			vis, err := check(ctx, repo)
+			// A summarize worker's check finds the repo private meanwhile.
+			h.st.Visibility(ctx, repo, h.tick, false, true, h.now, "private")
+			return vis, err
+		}
+		h.drain()
+		if h.ntfy.count() != 0 || h.alert(r).State != store.AlertQueued {
+			t.Errorf("%d POSTs, %s", h.ntfy.count(), h.alert(r).State)
+		}
+	})
+	t.Run("notes changed, not yet rescanned", func(t *testing.T) {
+		h, r := setup(t)
+		hash, _ := h.st.PutNotes(ctx, "Faster startup")
+		if err := h.st.ResolveNotes(ctx, "o/r", "v1.2.3", "release_body", hash, h.now); err != nil {
+			t.Fatal(err)
+		}
+		h.drain()
+		if h.ntfy.count() != 0 {
+			t.Fatal("sent an alert for notes that no longer fix the advisory")
+		}
+		h.pass()
+		if n := h.alert(r); n.State != store.AlertCancelled {
+			t.Errorf("after the rescan: %s", n.State)
+		}
+	})
+	t.Run("deleted on GitHub", func(t *testing.T) {
+		h, r := setup(t)
+		if err := h.st.RecordVerify(ctx, "o/r", "v1.2.3", store.VerifyNotFound, h.now); err != nil {
+			t.Fatal(err)
+		}
+		h.drain()
+		if h.ntfy.count() != 0 {
+			t.Fatal("alerted for a deleted release")
+		}
+		h.pass()
+		if n := h.alert(r); n.State != store.AlertCancelled {
+			t.Errorf("after recompute: %s", n.State)
+		}
+		// Back again: re-escalated and sent.
+		h.st.RecordVerify(ctx, "o/r", "v1.2.3", store.VerifyFound, h.now)
+		h.pass()
+		h.drain()
+		if n := h.alert(r); n.State != store.AlertSent {
+			t.Errorf("after reappearing: %s", n.State)
+		}
+	})
+}

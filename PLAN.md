@@ -60,7 +60,7 @@ The workaround of pointing RSSbrew at `github.com/<repo>/releases.atom` URLs mis
                      compare commits
 ```
 
-There is one long-lived process. Each scheduler tick runs three stages: a **poll pass**, then a **summarize pass**, then a **render**. The HTTP server only reads the rendered bytes. This matches feed-me: one writer, many readers.
+There is one long-lived process. Each scheduler tick runs its stages in order: a **poll pass**, a **summarize pass**, the **alert stage** (§3.4), then a **render**. The HTTP server only reads the rendered bytes. The alert outbox worker (§3.4) is the one other writer; SQLite transactions take the write lock when they begin, so the two never fail on a lock upgrade.
 
 **Bounded passes:** no single slow repo or flaky upstream can stall the feed.
 
@@ -262,9 +262,9 @@ When a new release fixes a serious security issue, the feed item alone is too ea
    - The rule is **deliberately conservative**. A false negative only drops this signal, while the LLM signal and the feed marking remain. A false positive sends a wrong urgent alert, which is worse.
 3. **Neither.** The link is stored with `fixes = 0`. The advisory doesn't fire the signal and is logged.
 
-`fixes` is stored on the link and re-evaluated with `matched` on every recompute.
+`fixes` is stored on the link and re-evaluated with `matched` on every recompute. Version evidence is unavailable, too, when either tag has no version or the advisory gives no patched version and range for the package; when it's available and says no (the predecessor was already patched, or the release is still vulnerable), text evidence doesn't apply.
 
-1. **Advisory signal (deterministic, preferred).** GHSA IDs (`GHSA-xxxx-xxxx-xxxx`) and CVE IDs in the resolved notes are looked up through GitHub's global advisory API: `GET /advisories/{ghsa_id}`, or `GET /advisories?cve_id=…`. The release is urgent if any advisory meets three conditions: its severity is ≥ `notify.min_severity` (default `high`), it isn't withdrawn, and it **matches this repo**. An LLM can't talk this signal down.
+1. **Advisory signal (deterministic, preferred).** GHSA IDs (`GHSA-xxxx-xxxx-xxxx`, in GitHub's ID alphabet) and CVE IDs in the resolved notes, at most 20 per release in order of mention, are looked up through GitHub's global advisory API: `GET /advisories/{ghsa_id}`, or `GET /advisories?cve_id=…`. The release is urgent if any advisory meets three conditions: its severity is ≥ `notify.min_severity` (default `high`), it isn't withdrawn, and it **matches this repo**. An LLM can't talk this signal down.
 
    - **Matching a repo to an advisory:**
      1. **Automatic:** the advisory's `source_code_location` normalizes to `https://github.com/{owner}/{repo}`.
@@ -275,7 +275,8 @@ When a new release fixes a serious security issue, the feed item alone is too ea
      - `max_age` limits only **new notifications**. It doesn't limit refresh or how the feed is marked. A withdrawal after `max_age` still clears the marking (with a content change, §1).
      - A not-found advisory (a brand-new GHSA not yet in the global database) is retried after 1h.
      - Transient errors back off from 5m to a 1h cap.
-     - Re-evaluation runs from its own bounded queue each tick (up to 20 lookups). It's independent of summarize eligibility, so a `summarized` release can still become urgent when its advisory is published or upgraded later.
+     - Re-evaluation runs from its own bounded queue each tick (up to 20 lookups, never-fetched IDs first). It's independent of summarize eligibility, so a `summarized` release can still become urgent when its advisory is published or upgraded later. A lookup names only the advisory ID, never a repo. A rate limit ends the batch until the next tick.
+     - Notes are scanned for IDs when they first resolve and again whenever they change (`advisories_hash` records the notes hash scanned), at most 200 releases per tick; links to IDs no longer mentioned are removed.
 2. **LLM signal.** The summary schema gains `"security_urgency": "none" | "advisory" | "urgent"` and `"security_reason": "string"`. The prompt defines `urgent` narrowly: the notes describe a fixed vulnerability that is remote code execution, an authentication or authorization bypass, known exploitation, or an explicit "upgrade immediately". Ordinary hardening and dependency CVE bumps are `advisory`.
 
    To limit false positives, `urgent` only counts if the item's `security` list is non-empty **and** the resolved notes contain a security keyword (`security`, `vulnerab`, `CVE-`, `GHSA-`, `exploit`). Otherwise it's downgraded to `advisory` and logged.
@@ -286,19 +287,11 @@ When a new release fixes a serious security issue, the feed item alone is too ea
 - a new or updated LLM summary
 - a config change that affects matching or thresholds: `min_severity`, or a repo's `packages`
 
-Config inputs are fingerprinted, and the fingerprint is stored in `scheduler_state`. At startup and on SIGHUP, a changed fingerprint triggers a recompute of every alert-eligible or currently marked release of the affected repos.
+Config inputs are fingerprinted, and the fingerprint is stored in `scheduler_state`. The config is read only at startup (SIGHUP re-reads secrets, not the config, §4.3), so a config change takes effect on restart. At startup, a changed fingerprint marks every release for an urgency recompute before the outbox worker starts.
 
-- **At startup**, the recompute finishes before the outbox worker starts.
-- **On SIGHUP**, the worker is already running, so the two are synchronized by a short **send gate** (an in-process mutex) and an in-flight counter. No lock is held across a POST, so reload never waits behind a claim:
-  1. Reload takes the gate, sets `reload_pending` and releases the gate. This happens first, before any waiting, and new claims stop at once.
-  2. The worker's decision to send is made **under the gate**: it takes the gate, re-reads the row and `reload_pending`, and only if the row is still `claimed` and the flag is clear does it mark the row `sending`, increment the in-flight counter and release the gate. Then it POSTs. If the flag is set, the row goes straight back to `queued` (no backoff, no attempt counted) without sending. Because the flag is set and checked under the same gate, there's no gap between the check and the start of a POST: every row is either already `sending` when the flag is set or sees the flag.
-  3. Reload waits only until the in-flight counter drains, at most one request timeout (10s).
-  4. It recomputes and commits. Released rows are re-evaluated like any queued row, so a now-stale one is cancelled.
-  5. It takes the gate, clears `reload_pending` and releases it.
+**Recompute.** Every input change sets `urgency_dirty` on the releases it affects: an advisory lookup on every linked release, a new summary on its release, a notes change through the rescan of its advisory IDs, a config change on every release. The alert stage recomputes dirty releases in repos confirmed for the tick, right after the summarize stage, so a summary's decision lands in the tick that produced it. The outbox never claims an alert whose release is dirty: an alert made stale by a change waits for its recompute, which cancels it. No in-process send gate is needed.
 
-  The only alert that can go out stale is one already marked `sending` before reload set the flag. That's the same one-request window as other cancellation races, and it's logged.
-
-Either way, a queued alert that a config change made stale is cancelled before it can be claimed or sent.
+So a queued alert that a config change made stale is cancelled before it can be claimed or sent.
 
 The result of the recompute is the maximum of the two signals:
 
@@ -311,16 +304,16 @@ So urgency can go **down** as well as up, for example when the only qualifying a
 
 | ntfy header | Value |
 |---|---|
-| `Title` | `🚨 {repo} {version}: security release` |
+| `Title` | `🚨 {repo} {tag}: security release` (RFC 2047-encoded, which ntfy decodes) |
 | `Priority` | `5` (max) for critical advisories or LLM `urgent`, otherwise `4` |
 | `Tags` | `rotating_light,{repo}`, plus advisory IDs |
 | `Click` | the GitHub release URL |
-| `Actions` | `view, Advisory, https://github.com/advisories/{ghsa}` for each advisory (max 2) |
+| `Actions` | `view, Advisory, https://github.com/advisories/{ghsa}` for each firing advisory (max 2) |
 | `Markdown` | `yes` |
 
 The body is Markdown with a **UTF-8 byte budget of 3,500**, below ntfy's 4,096-byte limit, past which ntfy turns the message into an attachment. It's assembled in priority order and stops before the budget is exceeded:
 
-1. the headline
+1. the headline (without a summary, the first firing advisory's summary)
 2. advisory severity and ID
 3. `security_reason`, capped at 300 bytes
 4. the `security` bullets, one at a time
@@ -332,7 +325,7 @@ Truncation happens at a rune boundary with `…`. The links are in headers (`Cli
 
 - **Timing:** it wakes every 30s, or immediately when a row is enqueued, and sends at most 10 per wake, each with a 10s request timeout. Dispatch latency after a decision is normally a few seconds.
 - **Enqueued once per release.** Rows are keyed by GUID, so `resummarize`, restarts and state transitions never enqueue twice.
-- **Claiming.** The worker **claims** a row by atomically moving it from `queued` to `sending` in its own transaction. Only then does it run the just-in-time visibility check. In a **second transaction** immediately before the POST, it re-reads the row and proceeds only if it's still `sending` and `cancel_requested = 0`. It then sends the stored `payload` exactly as it is.
+- **Claiming.** The worker **claims** a row by atomically moving it from `queued` to `sending` in its own transaction. It skips rows whose release is `urgency_dirty` or whose repo is held. Only then does it run the just-in-time visibility check (10s timeout). In a **second transaction** immediately before the POST, it re-reads the row and proceeds only if it's still `sending` and `cancel_requested = 0`. It then sends the stored `payload` exactly as it is.
 - **Every claimed row ends in exactly one state**, decided in one transaction after the attempt:
 
   | Outcome | `cancel_requested = 0` | `cancel_requested = 1` |
@@ -353,9 +346,9 @@ Truncation happens at a rune boundary with `…`. The links are in headers (`Cli
 
   A re-queued alert never carries a withdrawn advisory's text.
   - A `sent` row is never touched: no retraction, and no second send.
-- **Crash safety.** A row left in `sending` after a crash or restart goes back to `queued` at startup, which is consistent with at-least-once.
+- **Crash safety.** A row left in `sending` after a crash or restart goes back to `queued` at startup (or to `cancelled` if a cancel was requested), which is consistent with at-least-once.
 - **Delivery is at-least-once.** A row is marked `sent` only after a 2xx. If ntfy accepted the POST but the response was lost (timeout, connection reset, crash before the commit), the retry can deliver a **duplicate**. That's deliberate: for an urgent security alert, a rare duplicate beats a lost alert. The README documents it.
-- **Retries:** a failed or ambiguous delivery retries with backoff (1m → 1h cap) **until it succeeds or the release passes `notify.max_age`**. The next attempt is scheduled at `min(now + backoff, expiry − 2m)`, so a backoff step can never jump past the window: there's always a final attempt just before expiry. Then it's marked `expired`, logged at error level, and reported on `/healthz` as degraded until it's acknowledged with `release-digest notify ack`.
+- **Retries:** a failed or ambiguous delivery retries with backoff (1m → 1h cap) **until it succeeds or the release passes `notify.max_age`**. The next attempt is scheduled at `min(now + backoff, expiry − 2m)`, so a backoff step can never jump past the window: there's always a final attempt just before expiry. After the final attempt the next one is scheduled at expiry itself, so the row is marked `expired`, logged at error level, and reported on `/healthz` as degraded (503, so Docker shows the container unhealthy) until it's acknowledged with `release-digest notify ack`.
 - **Exact guarantee:** the alert is delivered, possibly more than once, **if any attempt inside the alert window succeeds** (`max_age`, default 7d, from the release's pubDate). Attempts run at least hourly throughout the window, plus one just before expiry, and they're also held while the repo lacks fresh public confirmation (§3.1). An ntfy outage that covers every attempt drops the alert, but never silently. A week-late "urgent" ping has little value, and the release is still marked in the feed.
 - **Not on backfill.** Alert eligibility depends on **publication time**, not discovery path:
   - A release alerts only if `published_at > repo_state.initialized_at` (it shipped after tracking began) and it's within `notify.max_age` (default 7d) by pubDate.
@@ -363,13 +356,14 @@ Truncation happens at a rune boundary with `…`. The links are in headers (`Cli
   - Releases that predate tracking never alert unless `notify.include_backfill: true`.
   - `origin` is still stored for diagnostics and the `backfill` quota, but it doesn't gate alerts.
   - Adding a repo never produces an alert storm. After downtime, only urgent releases from the last `max_age` alert, which is the point.
-- **Pre-releases** alert only if `notify.include_prereleases: true`.
+- **Pre-releases** alert only if `notify.include_prereleases: true`. Skipped releases and releases confirmed deleted never alert.
+- **Delivery is `run`'s job.** `build` decides urgency and queues alerts; the next `run` delivers them.
 - **Late detection still counts.** An item already published as `fallback` can turn urgent later when its LLM summary lands. It still alerts once, if it's within `max_age`.
 - **Feed marking.** Urgent items also get a `🚨` title prefix and a `security-urgent` category in the feed, whether or not ntfy is configured.
 
-**Auth.** An ntfy access token is a third secret, loaded exactly like the others (§4.3): `NTFY_TOKEN_FILE`, `/run/secrets/ntfy_token` or `NTFY_TOKEN`. It's sent as `Authorization: Bearer`. On public ntfy.sh, the topic name itself acts as a password. `config lint` warns when the URL is on `ntfy.sh` with no token, and the topic can be kept out of the YAML with `NTFY_URL_FILE` (same rules as a secret).
+**Auth.** An ntfy access token is a third secret, loaded exactly like the others (§4.3): `NTFY_TOKEN_FILE`, `/run/secrets/ntfy_token` or `NTFY_TOKEN`. It's sent as `Authorization: Bearer`. On public ntfy.sh, the topic name itself acts as a password. `config lint` warns when the URL is on `ntfy.sh` with no token, and the topic can be kept out of the YAML with `NTFY_URL_FILE`, `/run/secrets/ntfy_url` or `NTFY_URL` (same rules as a secret). Setting it both there and in `notify.ntfy.url` is a startup error. The URL never appears in logs or errors. Alerts are on when an ntfy URL is configured; a SIGHUP can rotate the URL secret but not add or remove it.
 
-**Testing it.** `release-digest notify test` sends a sample alert through the configured path. `release-digest notify test --release owner/repo@tag` runs detection on a real release and prints the decision, the signals and the payload, without sending.
+**Testing it.** `release-digest notify test` sends a sample alert through the configured path. `release-digest notify test --release owner/repo@tag` runs detection on a real release and prints the decision, the signals and the payload, without sending. Like `summarize`, it resolves the notes from GitHub and writes nothing; with a model configured it also runs the LLM, under the same just-in-time checks.
 
 ### 3.5 Store
 
@@ -473,6 +467,7 @@ Each secret can come from exactly **one** of three sources. The ntfy topic URL c
 | LLM API key (e.g. OpenRouter) | `LLM_API_KEY_FILE` | `/run/secrets/llm_api_key` | `LLM_API_KEY` |
 | GitHub token | `GITHUB_TOKEN_FILE` | `/run/secrets/github_token` | `GITHUB_TOKEN` |
 | ntfy access token (§3.4) | `NTFY_TOKEN_FILE` | `/run/secrets/ntfy_token` | `NTFY_TOKEN` |
+| ntfy URL, when not in YAML (§3.4) | `NTFY_URL_FILE` | `/run/secrets/ntfy_url` | `NTFY_URL` |
 
 Rules:
 
@@ -605,15 +600,15 @@ The Dockerfile is the same two-stage, cross-compiled, distroless-nonroot build a
 ## 8. Project layout
 
 ```
-cmd/release-digest/      main, run, build, summarize, config lint, healthcheck
+cmd/release-digest/      main, run, build, summarize, notify, config lint, healthcheck
 internal/config/         YAML + env merge, defaults, validation
 internal/github/         REST client: releases, tags, commits, compare, contents; ETag cache; rate-limit pacing
 internal/notes/          resolve notes: body heuristics, changelog section extraction, compare fallback, truncation
 internal/secret/         secret.String (redacting), *_FILE / /run/secrets / env resolution, SIGHUP reload
 internal/llm/            OpenAI-compatible client, response_format fallbacks, retries (llmtest: a fake server)
 internal/summarize/      prompt, schema validation and repair, cache key, the summarize stage
-internal/advisory/       GHSA/CVE extraction from notes, GitHub advisory lookup + cache
-internal/notify/         urgency decision, ntfy client, outbox delivery + retries
+internal/advisory/       GHSA/CVE extraction, fix evidence (versions, text), repo matching
+internal/notify/         urgency decision, the alert stage (scans, lookups + cache, recompute), payloads, ntfy client, outbox worker
 internal/feed/           RSS/Atom render + checks (ported from feed-me)
 internal/store/          SQLite + migrations
 internal/scheduler/      interval + jitter, single-flight passes (ported)
@@ -657,6 +652,8 @@ CREATE TABLE releases (
   body_hash      TEXT NOT NULL DEFAULT '',  -- → notes.hash: the release body as published (§3.2)
   notes_resolved INTEGER NOT NULL DEFAULT 0, -- 1 once notes_source is final ('' then means no notes)
   resolve_attempted_at INTEGER,             -- resolution queue order (§3.2)
+  advisories_hash TEXT NOT NULL DEFAULT '', -- notes_hash last scanned for advisory IDs (§3.4)
+  urgency_dirty  INTEGER NOT NULL DEFAULT 0, -- urgency inputs changed since the last decision (§3.4)
   PRIMARY KEY (repo, tag)
 );
 CREATE INDEX releases_feed ON releases (state, published_at DESC);
@@ -685,7 +682,9 @@ CREATE TABLE scheduler_state (key TEXT PRIMARY KEY, value TEXT);  -- poll and sw
 CREATE TABLE rendered (path TEXT PRIMARY KEY, bytes BLOB, etag TEXT, modified_at INTEGER);
 
 CREATE TABLE advisories (id TEXT PRIMARY KEY, found INTEGER NOT NULL, severity TEXT, withdrawn_at INTEGER,
-                         json TEXT, fetched_at INTEGER NOT NULL, next_fetch_at INTEGER NOT NULL);
+                         json TEXT,                    -- the advisories under the ID, as an array
+                         fetched_at INTEGER NOT NULL, next_fetch_at INTEGER NOT NULL,
+                         errors INTEGER NOT NULL DEFAULT 0);  -- consecutive failed lookups
 CREATE TABLE release_advisories (repo TEXT, tag TEXT, advisory_id TEXT,
                                  matched INTEGER NOT NULL DEFAULT 0,  -- re-evaluated on each recompute (§3.4)
                                  fixes   INTEGER NOT NULL DEFAULT 0,  -- this release fixes it (§3.4)
@@ -700,7 +699,11 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
   attempts    INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER,
   created_at  INTEGER NOT NULL,
-  sent_at     INTEGER
+  sent_at     INTEGER,
+  repo        TEXT NOT NULL, tag TEXT NOT NULL,
+  expires_at  INTEGER NOT NULL,            -- published_at + notify.max_age
+  last_error  TEXT NOT NULL DEFAULT '',
+  acked_at    INTEGER                      -- an expired alert, acknowledged (notify ack)
 );
 ```
 
@@ -753,15 +756,10 @@ CREATE TABLE notifications (               -- outbox (§3.4); one row per releas
     - a row stuck in `sending` after a crash → re-queued at startup
   - Re-escalation by a different advisory rebuilds the payload.
   - De-escalation then re-escalation while a row is `sending`: on POST failure, the row is re-queued with the rebuilt payload, not cancelled.
-  - SIGHUP that changes `packages`:
-    - while the worker holds a claim that hasn't POSTed: reload sets `reload_pending` without waiting on the claim; the row is released to `queued` without sending, recomputed and cancelled
-    - the flag set between the worker's re-read and its POST is impossible: a test interleaves reload at each step of the worker's gate section and asserts the row is either already `sending` or released
-    - while a POST is in flight: reload waits for it and logs it if the alert turned stale
-    - a stale queued alert for another release is cancelled before any further claim
+  - A restart with changed alert settings: a queued alert is held (its release is `urgency_dirty`) until the first tick's recompute, which cancels it if it went stale.
   - Advisory fix evidence when `prev_tag` is unknown: a later release that only cites the advisory gets no version evidence and needs text evidence. These all yield `fixes = 0`: "We do not fix CVE-…", "We will fix CVE-… in the next release", "fix planned for GHSA-…", "CVE-… isn't fixed", "CVE-… wasn’t fully patched" (curly apostrophe), "CVE-… is partially mitigated", and free prose without an allowlisted form ("this release is about CVE-…"). These yield `fixes = 1`: "- Fix CVE-… in parser", "Security: Fixes GHSA-…" and "CVE-… is patched".
   - The outbox delivers and retries between ticks using only its just-in-time check, including the final pre-expiry attempt.
   - Sweep rotation: 3 always-timing-out repos at the head of the list don't stop the others being confirmed within the stated number of ticks.
-  - Editing a repo's `packages`, then SIGHUP, re-matches advisories and cancels a now-stale queued alert before the worker runs.
   - Advisory fix evidence: a release past `first_patched_version` whose predecessor is vulnerable fires the signal. Notes that say "CVE-… is not yet fixed", or that cite an upstream advisory, don't.
   - A newly inserted `pending` row is summarize-eligible immediately (`next_attempt_at = first_seen_at`).
   - With `notify.max_age: 14d`, a post-initialization release recovered by reconciliation on day 10 is `pending` and alert-eligible.

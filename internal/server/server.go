@@ -26,6 +26,9 @@ type Server struct {
 
 	mu    sync.RWMutex
 	feeds map[string]*store.Rendered // by path, e.g. feed.xml
+
+	// Health, if set, reports a problem that makes /healthz answer 503.
+	Health func(ctx context.Context) error
 }
 
 func New(title, publicBaseURL string, log *slog.Logger) *Server {
@@ -62,6 +65,13 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if s.Health != nil {
+			if err := s.Health(r.Context()); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				fmt.Fprintln(w, err)
+				return
+			}
+		}
 		fmt.Fprintln(w, "ok")
 	})
 	mux.HandleFunc("GET /{$}", s.serveIndex)

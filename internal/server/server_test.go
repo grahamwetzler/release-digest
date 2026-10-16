@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -53,5 +55,20 @@ func TestServe(t *testing.T) {
 	}
 	if resp := get(t, h, "/nope", nil); resp.StatusCode != 404 {
 		t.Errorf("unknown path: %s", resp.Status)
+	}
+}
+
+func TestHealthzReportsDegraded(t *testing.T) {
+	s := New("Release Digest", "https://rss.example.com", slog.New(slog.DiscardHandler))
+	var problem error
+	s.Health = func(context.Context) error { return problem }
+	if resp := get(t, s.Handler(), "/healthz", nil); resp.StatusCode != 200 {
+		t.Errorf("healthy: %s", resp.Status)
+	}
+	problem = errors.New("degraded: 1 security alert(s) expired undelivered")
+	resp := get(t, s.Handler(), "/healthz", nil)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "expired undelivered") {
+		t.Errorf("degraded: %s %q", resp.Status, body)
 	}
 }

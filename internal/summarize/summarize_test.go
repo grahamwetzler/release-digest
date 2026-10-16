@@ -18,7 +18,7 @@ import (
 	"release-digest/internal/store"
 )
 
-const good = `{"headline":"Adds streaming","breaking":[],"features":["Streaming responses"],"fixes":[],"security":[],"noise_only":false}`
+const good = `{"headline":"Adds streaming","breaking":[],"features":["Streaming responses"],"fixes":[],"security":[],"noise_only":false,"security_urgency":"none","security_reason":""}`
 
 func TestKey(t *testing.T) {
 	e := Endpoint{BaseURL: "https://openrouter.ai/api/v1", Model: "m", Temperature: 0.2}
@@ -64,7 +64,7 @@ func TestLoadPromptReadsTheFile(t *testing.T) {
 }
 
 func TestParse(t *testing.T) {
-	s, err := Parse("```json\n" + `{"headline":"  Faster   builds ","breaking":[],"features":["a"," ","b","c","d","e","f","g"],"fixes":[],"security":[],"noise_only":false}` + "\n```")
+	s, err := Parse("```json\n" + `{"headline":"  Faster   builds ","breaking":[],"features":["a"," ","b","c","d","e","f","g"],"fixes":[],"security":[],"noise_only":false,"security_urgency":"none","security_reason":""}` + "\n```")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,14 +89,14 @@ func TestParse(t *testing.T) {
 	if _, err := Parse(`{"headline":"ok","breaking":null,"features":[],"fixes":[],"security":[],"noise_only":false}`); err == nil {
 		t.Error("a null list was accepted")
 	}
-	s, err = Parse(`{"headline":"ok","breaking":["Drops X"],"features":[],"fixes":[],"security":[],"noise_only":true}`)
+	s, err = Parse(`{"headline":"ok","breaking":["Drops X"],"features":[],"fixes":[],"security":[],"noise_only":true,"security_urgency":"none","security_reason":""}`)
 	if err != nil || s.NoiseOnly {
 		t.Errorf("noise_only with a breaking change: %+v, %v", s, err)
 	}
 	if d, _ := Decode(`{"headline":"ok","security":["CVE-1"],"noise_only":true}`); d.NoiseOnly {
 		t.Error("Decode kept a contradictory noise_only")
 	}
-	if _, err := Parse(`{"headline":"` + strings.Repeat("é", MaxHeadline) + `","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":false}`); err != nil {
+	if _, err := Parse(`{"headline":"` + strings.Repeat("é", MaxHeadline) + `","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":false,"security_urgency":"none","security_reason":""}`); err != nil {
 		t.Errorf("a headline of %d runes was rejected: %v", MaxHeadline, err)
 	}
 }
@@ -294,7 +294,7 @@ func TestFailuresBackOff(t *testing.T) {
 func TestRepairRetry(t *testing.T) {
 	h := newHarness(t)
 	h.add("o/r", "v1", store.StatePending, t0)
-	h.fake.Queue(llmtest.Reply{Content: `{"headline":"","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":true}`})
+	h.fake.Queue(llmtest.Reply{Content: `{"headline":"","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":true,"security_urgency":"none","security_reason":""}`})
 	h.pass()
 	reqs := h.fake.Requests()
 	if len(reqs) != 2 {
@@ -480,5 +480,25 @@ func TestLLMRetriesAreGated(t *testing.T) {
 	}
 	if r := h.get("o/r", "v1"); r.State != store.StatePending || r.Attempts != 0 {
 		t.Errorf("state %s, attempts %d", r.State, r.Attempts)
+	}
+}
+
+func TestParseUrgency(t *testing.T) {
+	reply := func(urgency, reason string) string {
+		return `{"headline":"ok","breaking":[],"features":[],"fixes":[],"security":["Fixes CVE-2026-1"],"noise_only":false,` +
+			`"security_urgency":"` + urgency + `","security_reason":"` + reason + `"}`
+	}
+	s, err := Parse(reply("urgent", "  Remote   code execution. "))
+	if err != nil || s.Urgency() != UrgencyUrgent || s.SecurityReason != "Remote code execution." {
+		t.Errorf("Parse = %+v, %v", s, err)
+	}
+	for _, bad := range []string{reply("high", ""), reply("", ""), reply("urgent", strings.Repeat("x", MaxReason+1))} {
+		if _, err := Parse(bad); err == nil {
+			t.Errorf("Parse(%.60q…) accepted", bad[60:])
+		}
+	}
+	// A version 1 summary has no urgency.
+	if d, err := Decode(`{"headline":"ok","security":["CVE-1"]}`); err != nil || d.Urgency() != UrgencyNone {
+		t.Errorf("Decode(v1) = %+v, %v", d, err)
 	}
 }

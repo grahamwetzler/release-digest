@@ -168,6 +168,21 @@ var migrations = []string{
 	ALTER TABLE releases ADD COLUMN resolve_attempted_at INTEGER;
 	UPDATE releases SET body_hash = notes_hash WHERE notes_source = 'release_body';
 	CREATE INDEX releases_unresolved ON releases (resolve_attempted_at) WHERE notes_resolved = 0;`,
+	// 4: security alerts (§3.4). advisories_hash is the notes_hash last
+	// scanned for advisory IDs; urgency_dirty marks a release whose urgency
+	// inputs changed since it was last decided. Outbox rows carry their
+	// release and alert window.
+	`ALTER TABLE releases ADD COLUMN advisories_hash TEXT NOT NULL DEFAULT '';
+	ALTER TABLE releases ADD COLUMN urgency_dirty INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE advisories ADD COLUMN errors INTEGER NOT NULL DEFAULT 0;     -- consecutive failed lookups
+	ALTER TABLE notifications ADD COLUMN repo TEXT NOT NULL DEFAULT '';
+	ALTER TABLE notifications ADD COLUMN tag TEXT NOT NULL DEFAULT '';
+	ALTER TABLE notifications ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0; -- published_at + notify.max_age
+	ALTER TABLE notifications ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
+	ALTER TABLE notifications ADD COLUMN acked_at INTEGER;                       -- an expired alert, acknowledged
+	CREATE INDEX release_advisories_by_id ON release_advisories (advisory_id);
+	CREATE INDEX releases_urgency_dirty ON releases (repo) WHERE urgency_dirty = 1;
+	CREATE INDEX notifications_due ON notifications (state, next_attempt_at);`,
 }
 
 // Open opens (creating if needed) the database at path and migrates it.
@@ -177,7 +192,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	dsn := "file:" + uriPath.Replace(path) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
+	// Transactions take the write lock when they begin (_txlock=immediate):
+	// the scheduler and the alert outbox both write, and a transaction that
+	// read first and then tried to write could fail at once with
+	// SQLITE_BUSY instead of waiting out busy_timeout.
+	dsn := "file:" + uriPath.Replace(path) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

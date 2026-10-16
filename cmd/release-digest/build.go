@@ -27,6 +27,11 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return 1
 	}
+	// Urgency is decided and alerts are queued, but only run delivers them.
+	if err := e.alerts.CheckConfig(ctx); err != nil {
+		fmt.Fprintf(stderr, "release-digest: %v\n", err)
+		return 1
+	}
 	if err := e.tick(ctx, nil); err != nil {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return 1

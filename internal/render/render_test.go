@@ -263,3 +263,22 @@ func TestSummarizedItem(t *testing.T) {
 		t.Errorf("unreadable summary: %+v", it)
 	}
 }
+
+func TestUrgentItemIsMarked(t *testing.T) {
+	r := &store.Release{Repo: "o/r", Tag: "v2", Kind: "release", State: store.StateFallback, Urgency: store.UrgencyUrgent,
+		NotesSource: "release_body", HTMLURL: "https://github.com/o/r/releases/tag/v2"}
+	it := Item(r, "Fixes CVE-2026-1", nil)
+	if it.Title != "🚨 o/r v2" || !slices.Contains(it.Categories, "security-urgent") {
+		t.Errorf("fallback: %q, %v", it.Title, it.Categories)
+	}
+	r.State = store.StateSummarized
+	sum := &summarize.Summary{Headline: "Fixes RCE", Breaking: []string{"Drops X"}, Security: []string{"Fixes CVE-2026-1"}}
+	it = Item(r, "", &store.Summary{Model: "m", JSON: sum.Encode()})
+	if it.Title != "🚨 ⚠ o/r v2 — Fixes RCE" || !slices.Equal(it.Categories, []string{"o/r", "breaking", "security", "security-urgent"}) {
+		t.Errorf("summarized: %q, %v", it.Title, it.Categories)
+	}
+	r.Urgency = store.UrgencyAdvisory
+	if it := Item(r, "", &store.Summary{Model: "m", JSON: sum.Encode()}); strings.Contains(it.Title, "🚨") {
+		t.Errorf("advisory marked: %q", it.Title)
+	}
+}

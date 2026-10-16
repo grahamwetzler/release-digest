@@ -141,7 +141,7 @@ func TestBuildSummarizesWithTheLLM(t *testing.T) {
 		{Tag: "v1.1.0", Body: "## Fixes\n- **Faster** startup on large workspaces", Published: now.Add(-time.Hour)},
 		{Tag: "v1.0.0", Body: "## Features\n- First release of the streaming client", Published: now.Add(-48 * time.Hour)},
 	}
-	ai := llmtest.New(`{"headline":"Starts faster","breaking":["Drops Go 1.25"],"features":[],"fixes":["Faster startup"],"security":[],"noise_only":false}`)
+	ai := llmtest.New(`{"headline":"Starts faster","breaking":["Drops Go 1.25"],"features":[],"fixes":["Faster startup"],"security":[],"noise_only":false,"security_urgency":"none","security_reason":""}`)
 	defer ai.Close()
 	cfg := writeConfig(t, "github: {api_url: "+gh.URL+"}\nllm: {base_url: "+ai.URL()+", model: test/model}\nrepos: [{repo: o/r}]\n")
 	t.Setenv("LLM_API_KEY", "sk-or-v1-buildkey")

@@ -42,6 +42,9 @@ var (
 	LLMAPIKey   = Spec{Label: "llm api key", Env: "LLM_API_KEY", DefaultPath: "/run/secrets/llm_api_key"}
 	GitHubToken = Spec{Label: "github token", Env: "GITHUB_TOKEN", DefaultPath: "/run/secrets/github_token"}
 	NtfyToken   = Spec{Label: "ntfy token", Env: "NTFY_TOKEN", DefaultPath: "/run/secrets/ntfy_token"}
+	// NtfyURL is the ntfy server and topic, which on ntfy.sh acts as a
+	// password; notify.ntfy.url in the config is the other way to set it.
+	NtfyURL = Spec{Label: "ntfy url", Env: "NTFY_URL", DefaultPath: "/run/secrets/ntfy_url"}
 )
 
 // Loaded is a resolved secret and a printable description of its source.

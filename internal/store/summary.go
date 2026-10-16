@@ -74,11 +74,13 @@ func (s ops) DueSummaries(ctx context.Context, tick int64, now time.Time, n int)
 // Summarized records a summary on a pending or fallback row whose notes are
 // still notesHash, publishing it if it was pending. The update is atomic
 // with the gate: it applies only while the repo is confirmed for tick and
-// not held (§3.1). It reports whether the row changed; it doesn't if the
-// notes changed or the confirmation was lost meanwhile.
+// not held (§3.1). The new summary is an urgency input, so the row's
+// urgency is marked for recomputing (§3.4). It reports whether the row
+// changed; it doesn't if the notes changed or the confirmation was lost
+// meanwhile.
 func (s ops) Summarized(ctx context.Context, repo, tag, notesHash, key string, tick int64, at time.Time) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE releases SET state = ?, summary_key = ?, attempts = 0, last_error = '',
-		content_updated_at = ? WHERE repo = ? AND tag = ? AND notes_hash = ? AND state IN (?, ?)
+		content_updated_at = ?, urgency_dirty = 1 WHERE repo = ? AND tag = ? AND notes_hash = ? AND state IN (?, ?)
 		AND EXISTS (SELECT 1 FROM repo_state rs WHERE rs.repo = releases.repo
 			AND rs.visibility_confirmed_tick = ? AND rs.held = 0)`,
 		StateSummarized, key, toMS(at), repo, tag, notesHash, StatePending, StateFallback, tick)

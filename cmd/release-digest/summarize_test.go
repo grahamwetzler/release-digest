@@ -23,7 +23,7 @@ func TestSummarizeDryRun(t *testing.T) {
 		{Tag: "v1.0.0", Body: "First release", Published: now.Add(-48 * time.Hour)},
 	}
 	gh.Repo("o/secret").Private = true
-	ai := llmtest.New(`{"headline":"Starts faster","breaking":[],"features":[],"fixes":["Faster startup"],"security":[],"noise_only":false}`)
+	ai := llmtest.New(`{"headline":"Starts faster","breaking":[],"features":[],"fixes":["Faster startup"],"security":[],"noise_only":false,"security_urgency":"none","security_reason":""}`)
 	defer ai.Close()
 	cfg := writeConfig(t, "github: {api_url: "+gh.URL+"}\nllm: {base_url: "+ai.URL()+", model: test/model}\n")
 	t.Setenv("GITHUB_TOKEN", "ghp_x")
@@ -76,7 +76,7 @@ func TestSummarizeDryRunDatesADateOrderedTag(t *testing.T) {
 	}
 	repo.Compares = map[string]githubtest.Comparison{"nightly-a...nightly-b": {Status: "ahead",
 		Commits: []githubtest.Commit{{Message: "Add the streaming parser", Login: "dev", Type: "User", Parents: 1}}}}
-	ai := llmtest.New(`{"headline":"Streaming parser","breaking":[],"features":["Streaming parser"],"fixes":[],"security":[],"noise_only":false}`)
+	ai := llmtest.New(`{"headline":"Streaming parser","breaking":[],"features":["Streaming parser"],"fixes":[],"security":[],"noise_only":false,"security_urgency":"none","security_reason":""}`)
 	defer ai.Close()
 	cfg := writeConfig(t, "github: {api_url: "+gh.URL+"}\nllm: {base_url: "+ai.URL()+", model: m}\n")
 
@@ -101,7 +101,7 @@ func TestSummarizeDryRunReportsAnUndeterminedPredecessor(t *testing.T) {
 		repo.Tags = append(repo.Tags, githubtest.Tag{Name: fmt.Sprintf("nightly-%c%c", 'a'+i/26, 'a'+i%26), SHA: fmt.Sprintf("c%d", i),
 			Date: now.Add(-time.Duration(i) * time.Hour)})
 	}
-	ai := llmtest.New(`{"headline":"x","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":true}`)
+	ai := llmtest.New(`{"headline":"x","breaking":[],"features":[],"fixes":[],"security":[],"noise_only":true,"security_urgency":"none","security_reason":""}`)
 	defer ai.Close()
 	cfg := writeConfig(t, "github: {api_url: "+gh.URL+"}\nllm: {base_url: "+ai.URL()+", model: m}\n")
 	var out, errb bytes.Buffer

@@ -9,13 +9,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"release-digest/internal/config"
 	"release-digest/internal/github"
 	"release-digest/internal/llm"
+	"release-digest/internal/notify"
 	"release-digest/internal/poll"
 	"release-digest/internal/secret"
 	"release-digest/internal/store"
@@ -35,6 +38,9 @@ Usage:
   release-digest build               one pass, then exit
   release-digest summarize owner/repo@tag
                                      dry run: resolve notes, call the LLM, print the result; writes nothing
+  release-digest notify test [--release owner/repo@tag]
+                                     send a test alert; with --release, print the alert decision for a release instead
+  release-digest notify ack          acknowledge expired alerts (clears /healthz's degraded state)
   release-digest validate [--w3c]    check the stored feed (optionally with the W3C validator)
   release-digest config lint         validate the config and secrets; exits non-zero on error
   release-digest healthcheck         probe /healthz (for Docker HEALTHCHECK)
@@ -64,6 +70,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdBuild(args, stdout, stderr)
 	case "summarize":
 		return cmdSummarize(args, stdout, stderr)
+	case "notify":
+		return cmdNotify(args, stdout, stderr)
 	case "validate":
 		return cmdValidate(args, stdout, stderr)
 	case "run":
@@ -111,10 +119,19 @@ func generator() string { return "release-digest/" + version }
 // secrets are the loaded credentials (§4.3). Clients read them at request
 // time, so a SIGHUP reload takes effect on the next request.
 type secrets struct {
-	LLM, GitHub, Ntfy *secret.Value
+	LLM, GitHub, Ntfy, NtfyURL *secret.Value
 }
 
-var secretSpecs = []secret.Spec{secret.LLMAPIKey, secret.GitHubToken, secret.NtfyToken}
+// secretSpecs, in the order loadSecrets returns them.
+var secretSpecs = []secret.Spec{secret.LLMAPIKey, secret.GitHubToken, secret.NtfyToken, secret.NtfyURL}
+
+// Indexes into loadSecrets' result.
+const (
+	secLLM = iota
+	secGitHub
+	secNtfy
+	secNtfyURL
+)
 
 // loadSecrets resolves every secret, returning all problems at once.
 func loadSecrets(env secret.Env) ([]secret.Loaded, error) {
@@ -139,6 +156,8 @@ type env struct {
 	gh      *github.Client
 	poller  *poll.Poller
 	summ    *summarize.Summarizer
+	alerts  *notify.Alerter
+	outbox  *notify.Outbox
 
 	// guardOK is set once the active GitHub token has passed the token guard
 	// (§3.1). Until then no tick polls GitHub.
@@ -158,8 +177,13 @@ func open(ctx context.Context, cfgPath string, stderr io.Writer) (*env, int) {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return nil, 1
 	}
+	if err := checkNtfyURL(cfg, loaded[secNtfyURL]); err != nil {
+		fmt.Fprintf(stderr, "release-digest: %v\n", err)
+		return nil, 1
+	}
 	e := &env{cfg: cfg, log: log, secrets: secrets{
-		LLM: secret.NewValue(loaded[0]), GitHub: secret.NewValue(loaded[1]), Ntfy: secret.NewValue(loaded[2]),
+		LLM: secret.NewValue(loaded[secLLM]), GitHub: secret.NewValue(loaded[secGitHub]),
+		Ntfy: secret.NewValue(loaded[secNtfy]), NtfyURL: secret.NewValue(loaded[secNtfyURL]),
 	}}
 	logSecrets(log, loaded)
 	if e.store, err = store.Open(ctx, cfg.StorePath); err != nil {
@@ -189,7 +213,47 @@ func open(ctx context.Context, cfgPath string, stderr io.Writer) (*env, int) {
 	if !e.summ.Enabled() {
 		log.Warn("no llm.model configured: releases are published as excerpts, without summaries")
 	}
+	e.outbox = &notify.Outbox{Store: e.store, Log: log,
+		Check: func(ctx context.Context, repo string) (github.Visibility, error) {
+			return e.gh.CheckPublic(ctx, repo, 0)
+		},
+		Ntfy: &notify.Ntfy{
+			URL:       e.ntfyURL,
+			Token:     func() secret.String { return e.secrets.Ntfy.Get().Value },
+			HTTP:      &http.Client{},
+			UserAgent: generator(),
+		}}
+	e.alerts = &notify.Alerter{Store: e.store, GH: e.gh, Cfg: cfg, Log: log, Enabled: e.ntfyURL() != "", Kick: e.outbox.Kick}
+	if !e.alerts.Enabled {
+		log.Info("no ntfy URL configured: urgent security releases are marked in the feed but not alerted")
+	}
 	return e, 0
+}
+
+// ntfyURL is the ntfy server and topic, from the config or the ntfy url
+// secret (§4.3); "" if alerts are off.
+func (e *env) ntfyURL() string {
+	if n := e.cfg.Notify.Ntfy; n != nil && n.URL != "" {
+		return n.URL
+	}
+	return e.secrets.NtfyURL.Get().Value.Reveal()
+}
+
+// checkNtfyURL rejects an ntfy URL set in both the config and a secret, or
+// a secret that isn't an http(s) URL. The value is never echoed: it holds
+// the topic.
+func checkNtfyURL(cfg *config.Config, l secret.Loaded) error {
+	if !l.Present() {
+		return nil
+	}
+	if n := cfg.Notify.Ntfy; n != nil && n.URL != "" {
+		return fmt.Errorf("notify.ntfy.url and the ntfy url secret (%s) are both set; remove one", l.Source)
+	}
+	u, err := url.Parse(l.Value.Reveal())
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.Trim(u.Path, "/") == "" {
+		return fmt.Errorf("the ntfy url secret (%s) must be an http(s) URL with a topic, such as https://ntfy.sh/my-topic", l.Source)
+	}
+	return nil
 }
 
 // startGuard runs the token guard at startup (§3.1). A token that fails it
@@ -236,7 +300,7 @@ func logSecrets(log *slog.Logger, loaded []secret.Loaded) {
 	for i, l := range loaded {
 		log.Info("secret", "name", secretSpecs[i].Label, "source", l.Source)
 	}
-	if !loaded[1].Present() {
+	if !loaded[secGitHub].Present() {
 		log.Warn("no GitHub token: requests are unauthenticated and limited to 60 per hour")
 	}
 }

@@ -18,6 +18,8 @@ Reply with a JSON object with these fields:
 - fixes: notable bug fixes.
 - security: fixed vulnerabilities and other security-relevant changes. Keep advisory IDs (GHSA-…, CVE-…) when the notes give them.
 - noise_only: true when nothing in the release is user-facing, for example only dependency bumps, CI or documentation changes.
+- security_urgency: "urgent" only when the notes describe a vulnerability this release fixes that is remote code execution, an authentication or authorization bypass, known to be exploited, or comes with an explicit "upgrade immediately". "advisory" for any other security fix, including ordinary hardening and dependency bumps for CVEs. Otherwise "none".
+- security_reason: one plain sentence saying why, at most 300 characters; empty when security_urgency is "none".
 
 Each list has at most 6 short items, most important first, and is empty when there is nothing for it. An item is one plain-text line with no Markdown. Leave out dependency bumps, CI and build changes, documentation-only changes, internal refactors and thanks to contributors.
 

@@ -43,7 +43,7 @@ func (s *syncBuffer) String() string {
 func cleanEnv(t *testing.T) {
 	for _, k := range []string{"RELEASE_DIGEST_CONFIG", "RELEASE_DIGEST_REPOS", "RELEASE_DIGEST_PUBLIC_BASE_URL",
 		"RELEASE_DIGEST_SCHEDULE_INTERVAL", "RELEASE_DIGEST_LLM_BASE_URL", "RELEASE_DIGEST_LLM_MODEL",
-		"LLM_API_KEY", "LLM_API_KEY_FILE", "GITHUB_TOKEN", "GITHUB_TOKEN_FILE", "NTFY_TOKEN", "NTFY_TOKEN_FILE"} {
+		"LLM_API_KEY", "LLM_API_KEY_FILE", "GITHUB_TOKEN", "GITHUB_TOKEN_FILE", "NTFY_TOKEN", "NTFY_TOKEN_FILE", "NTFY_URL", "NTFY_URL_FILE"} {
 		t.Setenv(k, "") // restores the original value after the test
 		os.Unsetenv(k)
 	}
@@ -210,7 +210,8 @@ func TestSIGHUPGuardsAReplacementToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := &env{log: slog.New(slog.NewTextHandler(&logs, nil)), secrets: secrets{
-		LLM: secret.NewValue(initial[0]), GitHub: secret.NewValue(initial[1]), Ntfy: secret.NewValue(initial[2]),
+		LLM: secret.NewValue(initial[secLLM]), GitHub: secret.NewValue(initial[secGitHub]), Ntfy: secret.NewValue(initial[secNtfy]),
+		NtfyURL: secret.NewValue(initial[secNtfyURL]),
 	}}
 	e.gh = &github.Client{BaseURL: gh.URL, HTTP: http.DefaultClient, UserAgent: "test",
 		Token: func() secret.String { return e.secrets.GitHub.Get().Value }}

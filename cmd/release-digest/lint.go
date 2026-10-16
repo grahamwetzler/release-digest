@@ -40,13 +40,26 @@ func cmdConfigLint(args []string, stdout, stderr io.Writer) int {
 	for i, l := range loaded {
 		fmt.Fprintf(stdout, "%s: %s\n", secretSpecs[i].Label, l.Source)
 	}
-	if !loaded[1].Present() {
+	if !loaded[secGitHub].Present() {
 		fmt.Fprintln(stdout, "warning: no GitHub token; requests are limited to 60 per hour")
+	}
+	ntfyURL := loaded[secNtfyURL].Value.Reveal()
+	if n := c.Notify.Ntfy; n != nil && n.URL != "" {
+		ntfyURL = n.URL
+	}
+	if err := checkNtfyURL(c, loaded[secNtfyURL]); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if ntfyURL == "" {
+		fmt.Fprintln(stdout, "alerts: off (no ntfy URL); urgent security releases are still marked in the feed")
+	} else if u, err := url.Parse(ntfyURL); err == nil && strings.EqualFold(u.Hostname(), "ntfy.sh") && !loaded[secNtfy].Present() {
+		fmt.Fprintln(stdout, "warning: ntfy.sh without a token: anyone who knows the topic can read the alerts; keep the URL in NTFY_URL_FILE")
 	}
 	if c.LLM.Model == "" {
 		fmt.Fprintln(stdout, "warning: llm.model is not set; releases are published as excerpts, without summaries")
 	}
-	if !loaded[0].Present() && !localURL(c.LLM.BaseURL) {
+	if !loaded[secLLM].Present() && !localURL(c.LLM.BaseURL) {
 		fmt.Fprintf(stdout, "warning: llm.base_url %s is not a local address and there is no llm api key\n", c.LLM.BaseURL)
 	}
 	return 0

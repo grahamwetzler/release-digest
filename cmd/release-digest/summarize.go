@@ -64,12 +64,12 @@ func cmdSummarize(args []string, stdout, stderr io.Writer) int {
 
 	gh := &github.Client{
 		BaseURL:   cfg.GitHub.APIURL,
-		Token:     func() secret.String { return loaded[1].Value },
+		Token:     func() secret.String { return loaded[secGitHub].Value },
 		HTTP:      &http.Client{},
 		Timeout:   cfg.GitHub.RequestTimeout.D,
 		UserAgent: generator(),
 	}
-	if err := gh.Guard(ctx, loaded[1].Value); err != nil {
+	if err := gh.Guard(ctx, loaded[secGitHub].Value); err != nil {
 		fmt.Fprintf(stderr, "release-digest: %v\n", err)
 		return 1
 	}
@@ -96,7 +96,7 @@ func cmdSummarize(args []string, stdout, stderr io.Writer) int {
 	s := &summarize.Summarizer{Cfg: cfg, LLM: &llm.Client{
 		BaseURL:     cfg.LLM.BaseURL,
 		Model:       cfg.LLM.Model,
-		Key:         func() secret.String { return loaded[0].Value },
+		Key:         func() secret.String { return loaded[secLLM].Value },
 		Headers:     cfg.LLM.Headers,
 		Temperature: *cfg.LLM.Temperature,
 		Timeout:     cfg.LLM.Timeout.D,

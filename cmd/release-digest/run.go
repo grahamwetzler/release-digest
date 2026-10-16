@@ -35,8 +35,8 @@ const stateLastTick = "last_tick"
 const guardTimeout = 30 * time.Second
 
 // tick runs one scheduler pass: the visibility sweep and poll (once the
-// token guard has passed), the summarize stage, the gated promotion of due
-// fallbacks, and the render, which always runs (§3). last_tick is recorded only after a fully
+// token guard has passed), the summarize stage, the alert stage (§3.4),
+// the gated promotion of due fallbacks, and the render, which always runs (§3). last_tick is recorded only after a fully
 // successful pass, so a restart after a failed one retries at once.
 func (e *env) tick(ctx context.Context, srv *server.Server) error {
 	start := time.Now()
@@ -57,6 +57,9 @@ func (e *env) tick(ctx context.Context, srv *server.Server) error {
 	}
 	if err := e.summarize(ctx, id, srv); err != nil {
 		errs = append(errs, fmt.Errorf("summarize: %w", err))
+	}
+	if err := e.alerts.Pass(ctx, id); err != nil {
+		errs = append(errs, fmt.Errorf("alerts: %w", err))
 	}
 	promoted, err := e.poller.Promote(ctx, id)
 	if err != nil {
@@ -120,7 +123,27 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// A changed alert config marks every release for an urgency recompute
+	// before the outbox starts, so no alert it made stale is sent (§3.4).
+	if err := e.alerts.CheckConfig(ctx); err != nil {
+		fmt.Fprintf(stderr, "release-digest: %v\n", err)
+		return 1
+	}
+	if err := e.outbox.Recover(ctx); err != nil {
+		fmt.Fprintf(stderr, "release-digest: %v\n", err)
+		return 1
+	}
+	outboxDone := make(chan struct{})
+	if e.alerts.Enabled {
+		go func() { defer close(outboxDone); e.outbox.Run(ctx) }()
+	} else {
+		close(outboxDone)
+	}
+	// The store closes only after the worker's last write.
+	defer func() { <-outboxDone }()
+
 	srv := server.New(c.Feed.Title, c.PublicBaseURL, e.log)
+	srv.Health = e.health
 	if err := srv.Load(ctx, e.store); err != nil {
 		e.log.Warn("no stored feed to serve yet", "err", err)
 	}
@@ -213,7 +236,7 @@ func (e *env) reloadSecrets(env secret.Env) {
 	}
 	// A replacement GitHub token must pass the token guard before it is
 	// activated; if it fails or can't be checked, nothing is reloaded (§3.1).
-	newTok := loaded[1].Value
+	newTok := loaded[secGitHub].Value
 	if newTok.Reveal() != e.secrets.GitHub.Get().Value.Reveal() {
 		ctx, cancel := context.WithTimeout(context.Background(), guardTimeout)
 		defer cancel()
@@ -223,11 +246,33 @@ func (e *env) reloadSecrets(env secret.Env) {
 		}
 		e.guardOK.Store(true)
 	}
-	e.secrets.LLM.Set(loaded[0])
-	e.secrets.GitHub.Set(loaded[1])
-	e.secrets.Ntfy.Set(loaded[2])
+	// Alerts were turned on or off at startup; a reload can't change that.
+	if err := checkNtfyURL(e.cfg, loaded[secNtfyURL]); err != nil || loaded[secNtfyURL].Present() != e.secrets.NtfyURL.Get().Present() {
+		if err == nil {
+			err = errors.New("the ntfy url secret was added or removed; restart to turn alerts on or off")
+		}
+		e.log.Error("SIGHUP: secrets not reloaded; keeping the current ones", "err", err)
+		return
+	}
+	e.secrets.LLM.Set(loaded[secLLM])
+	e.secrets.GitHub.Set(loaded[secGitHub])
+	e.secrets.Ntfy.Set(loaded[secNtfy])
+	e.secrets.NtfyURL.Set(loaded[secNtfyURL])
 	logSecrets(e.log, loaded)
 	e.log.Info("SIGHUP: secrets reloaded")
+}
+
+// health is the /healthz status: degraded while an expired alert awaits
+// acknowledgement (§3.4).
+func (e *env) health(ctx context.Context) error {
+	n, err := e.store.ExpiredUnacked(ctx)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return fmt.Errorf("degraded: %d security alert(s) expired undelivered; see the log, then run release-digest notify ack", n)
+	}
+	return nil
 }
 
 // cmdHealthcheck probes /healthz on the local server, for Docker's

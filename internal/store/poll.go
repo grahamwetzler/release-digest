@@ -392,8 +392,11 @@ func (s ops) PutCached(ctx context.Context, url string, e *CacheEntry, at time.T
 }
 
 // prefixed qualifies releaseColumns with a table alias.
-func prefixed(alias string) string {
-	cols := strings.Split(releaseColumns, ",")
+func prefixed(alias string) string { return prefixedWith(alias, releaseColumns) }
+
+// prefixedWith qualifies a column list with a table alias.
+func prefixedWith(alias, columns string) string {
+	cols := strings.Split(columns, ",")
 	for i, c := range cols {
 		cols[i] = alias + strings.TrimSpace(c)
 	}

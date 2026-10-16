@@ -376,6 +376,29 @@ func (c *Client) ReleaseByTag(ctx context.Context, repo, tag string) (*Release, 
 	return &r, nil
 }
 
+// Advisories looks an advisory up in GitHub's global advisory database
+// (§3.4): GET /advisories/{ghsa} for a GHSA ID, or /advisories?cve_id= for
+// a CVE ID. It returns the advisories as a JSON array, the form they are
+// stored in; none found is ErrNotFound. The lookup names only the ID, never
+// a repo.
+func (c *Client) Advisories(ctx context.Context, id string) (json.RawMessage, error) {
+	if strings.HasPrefix(id, "GHSA-") {
+		var one json.RawMessage
+		if _, err := c.getJSON(ctx, "/advisories/"+url.PathEscape(id), 0, &one); err != nil {
+			return nil, err
+		}
+		return json.RawMessage("[" + string(one) + "]"), nil
+	}
+	var list []json.RawMessage
+	if _, err := c.getJSON(ctx, "/advisories?cve_id="+url.QueryEscape(id), 0, &list); err != nil {
+		return nil, err
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("advisory %s: %w", id, ErrNotFound)
+	}
+	return json.Marshal(list)
+}
+
 // TagRef is one tag ref: the tag and the object it points at, a commit for
 // a lightweight tag or a tag object for an annotated one.
 type TagRef struct {

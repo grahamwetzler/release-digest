@@ -74,6 +74,10 @@ type Server struct {
 	Scopes       string // X-OAuth-Scopes for authenticated requests
 	PrivateRepos int    // how many repos /user/repos?visibility=private lists
 
+	// Advisories are the global advisories, by GHSA ID, as JSON objects.
+	// Lock Mu to change them while the server runs.
+	Advisories map[string]string
+
 	// RateLimited, when set, refuses every request with 403 and remaining 0 until Reset.
 	RateLimited bool
 	Reset       time.Time
@@ -178,6 +182,25 @@ func (s *Server) route(r *http.Request) (int, []byte, bool) {
 			repos[i] = map[string]any{"full_name": fmt.Sprintf("me/private%d", i), "private": true}
 		}
 		return ok(repos)
+	}
+	if id, found := strings.CutPrefix(path, "/advisories/"); found {
+		if a, ok := s.Advisories[id]; ok {
+			return http.StatusOK, []byte(a), false
+		}
+		return http.StatusNotFound, nil, false
+	}
+	if path == "/advisories" {
+		list := []json.RawMessage{}
+		for _, a := range s.Advisories {
+			var v struct {
+				CVE string `json:"cve_id"`
+			}
+			json.Unmarshal([]byte(a), &v)
+			if v.CVE != "" && v.CVE == q.Get("cve_id") {
+				list = append(list, json.RawMessage(a))
+			}
+		}
+		return ok(list)
 	}
 	parts := strings.SplitN(strings.TrimPrefix(path, "/repos/"), "/", 3)
 	if !strings.HasPrefix(path, "/repos/") || len(parts) < 2 {

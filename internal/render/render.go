@@ -57,8 +57,18 @@ const ExcerptChars = 600
 // release's notes text, if any, and sum its summary if it is summarized. A
 // summarized item shows the summary; a fallback shows an excerpt of the
 // notes; a no_notes item says there are none (§3.2, §3.3). A summarized
-// row whose summary can't be read is shown as a fallback.
+// row whose summary can't be read is shown as a fallback. An urgent
+// security release is marked whatever its state (§3.4).
 func Item(r *store.Release, notes string, sum *store.Summary) feed.Item {
+	it := item(r, notes, sum)
+	if r.Urgency == store.UrgencyUrgent {
+		it.Title = "🚨 " + it.Title
+		it.Categories = append(it.Categories, "security-urgent")
+	}
+	return it
+}
+
+func item(r *store.Release, notes string, sum *store.Summary) feed.Item {
 	version := r.Tag
 	if r.Name != "" && r.Name != r.Tag {
 		version = r.Name

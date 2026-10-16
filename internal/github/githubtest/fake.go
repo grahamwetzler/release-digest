@@ -3,6 +3,7 @@
 package githubtest
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -33,11 +34,30 @@ type Tag struct {
 	TaggerDate time.Time
 }
 
+// Commit is a fake commit of a comparison.
+type Commit struct {
+	Message, Login, Type, Name string
+	Parents                    int
+}
+
+// Comparison is a fake compare result; Commits are oldest first. Total
+// defaults to len(Commits).
+type Comparison struct {
+	Status  string
+	Total   int
+	Commits []Commit
+}
+
 // Repo is a fake repository. Releases and Tags are newest first.
 type Repo struct {
 	Private  bool
 	Releases []Release
 	Tags     []Tag
+	// Files maps a ref ("" for the default branch) to its files by path.
+	// A ref with no entry has an empty tree.
+	Files map[string]map[string]string
+	// Compares maps "base...head" to its comparison; any other is a 404.
+	Compares map[string]Comparison
 	// Status, when set, is returned for every request to the repo.
 	Status int
 	// Hang, when set, blocks every request to the repo until the client gives up.
@@ -225,6 +245,35 @@ func (s *Server) route(r *http.Request) (int, []byte, bool) {
 			if t.Name == tag {
 				return ok(map[string]any{"ref": "refs/tags/" + t.Name, "object": map[string]any{"sha": t.SHA}})
 			}
+		}
+	case rest == "contents" || rest == "contents/":
+		list := []map[string]any{}
+		for path := range repo.Files[q.Get("ref")] {
+			if !strings.Contains(path, "/") {
+				list = append(list, map[string]any{"name": path, "path": path, "type": "file"})
+			}
+		}
+		return ok(list)
+	case strings.HasPrefix(rest, "contents/"):
+		if text, found := repo.Files[q.Get("ref")][strings.TrimPrefix(rest, "contents/")]; found {
+			return http.StatusOK, []byte(text), false
+		}
+	case strings.HasPrefix(rest, "compare/"):
+		if c, found := repo.Compares[strings.TrimPrefix(rest, "compare/")]; found {
+			var commits []map[string]any
+			for i, cm := range c.Commits {
+				parents := make([]map[string]any, max(cm.Parents, 1))
+				for j := range parents {
+					parents[j] = map[string]any{"sha": fmt.Sprintf("p%d", j)}
+				}
+				x := map[string]any{"sha": fmt.Sprintf("c%d", i), "commit": map[string]any{"message": cm.Message,
+					"author": map[string]any{"name": cm.Name}}, "parents": parents, "author": nil}
+				if cm.Login != "" {
+					x["author"] = map[string]any{"login": cm.Login, "type": cmp.Or(cm.Type, "User")}
+				}
+				commits = append(commits, x)
+			}
+			return ok(map[string]any{"status": c.Status, "total_commits": cmp.Or(c.Total, len(c.Commits)), "commits": commits})
 		}
 	case strings.HasPrefix(rest, "commits/"):
 		sha := strings.TrimPrefix(rest, "commits/")

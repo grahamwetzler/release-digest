@@ -66,15 +66,19 @@ func TestGolden(t *testing.T) {
 		{"o/unicode", "版本-1", "", "tag"},
 	} {
 		pub := now.Add(-time.Duration(i) * day)
-		hash := ""
+		hash, state, prev := "", store.StateFallback, ""
+		if i == 1 {
+			state, prev = store.StateNoNotes, "service/s3/v1.2.2"
+		}
 		if i == 0 {
+			prev = "0.9.3"
 			hash, _ = st.PutNotes(ctx, "## Highlights\n\n- **Faster** lockfile resolution for [workspaces](https://docs.astral.sh/uv/) & <b>more</b>\n- Fixed `uv sync` on Windows")
 		}
 		_, err := st.InsertRelease(ctx, &store.Release{
 			NotesHash: hash, NotesSource: "release_body",
 			Repo: r.repo, Tag: r.tag, GUID: ident.GUID(r.repo, r.tag), Kind: r.kind, Name: r.name,
 			HTMLURL: "https://github.com/" + r.repo + "/releases/tag/" + r.tag, Prerelease: i == 2,
-			Published: pub, FirstSeen: pub, ContentUpdated: pub.Add(time.Hour), State: store.StateFallback, Origin: "live",
+			Published: pub, FirstSeen: pub, ContentUpdated: pub.Add(time.Hour), State: state, Origin: "live", PrevTag: prev,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -145,8 +149,8 @@ func TestPublishKeepsModifiedWhenUnchanged(t *testing.T) {
 
 func TestPlainText(t *testing.T) {
 	for in, want := range map[string]string{
-		"## Features\n\n* Add **bold** and `code`\n* See [docs](https://x.example)": "Features Add bold and code See docs",
-		"Setext\n======\n\n> quoted\n\n1. first\n2) second":                         "Setext quoted first second",
+		"## Features\n\n* Add **bold** and `code`\n* See [docs](https://x.example)": "Features • Add bold and code • See docs",
+		"Setext\n======\n\n> quoted\n\n1. first\n2) second":                         "Setext quoted • first • second",
 		"```go\nfmt.Println(1)\n```\n![logo](x.png) a < b > c &amp; d":              "fmt.Println(1) logo a < b > c & d",
 		"Keep __init__ and snake_case<br/>end":                                      "Keep __init__ and snake_case end",
 		"":                                                                          "",
@@ -158,12 +162,12 @@ func TestPlainText(t *testing.T) {
 }
 
 func TestFallbackItem(t *testing.T) {
-	r := &store.Release{Repo: "o/r", Tag: "v1", HTMLURL: "https://github.com/o/r/releases/tag/v1", State: store.StateFallback, Kind: "release"}
+	r := &store.Release{Repo: "o/r", Tag: "v1", HTMLURL: "https://github.com/o/r/releases/tag/v1", State: store.StateFallback, Kind: "release", NotesSource: "changelog"}
 	it := Item(r, strings.Repeat("word ", 200))
 	if n := utf8.RuneCountInString(it.Description); n > ExcerptChars+1 || !strings.HasSuffix(it.Description, "…") {
 		t.Errorf("description is %d runes: %q", n, it.Description)
 	}
-	for _, want := range []string{"<p>word word", `<a href="https://github.com/o/r/releases/tag/v1">Full release notes</a>`, "Summary pending."} {
+	for _, want := range []string{"<p>word word", `<a href="https://github.com/o/r/releases/tag/v1">Full release notes</a>`, "Summary pending. Excerpt from the changelog."} {
 		if !strings.Contains(it.ContentHTML, want) {
 			t.Errorf("missing %q in %s", want, it.ContentHTML)
 		}
@@ -171,5 +175,31 @@ func TestFallbackItem(t *testing.T) {
 	empty := Item(r, "")
 	if empty.Description != "Release notes for o/r v1." || !strings.Contains(empty.ContentHTML, ">Release notes</a>") {
 		t.Errorf("no notes: %+v", empty)
+	}
+}
+
+func TestNoNotesItem(t *testing.T) {
+	r := &store.Release{Repo: "o/r", Tag: "pkg/v2", PrevTag: "pkg/v1", Kind: "tag", State: store.StateNoNotes,
+		HTMLURL: "https://github.com/o/r/releases/tag/pkg/v2"}
+	it := Item(r, "")
+	if it.Description != "o/r pkg/v2 released — no release notes published." {
+		t.Errorf("description = %q", it.Description)
+	}
+	want := `<p><a href="https://github.com/o/r/releases/tag/pkg/v2">Tag</a> · <a href="https://github.com/o/r/compare/pkg/v1...pkg/v2">Diff since pkg/v1</a></p>`
+	if !strings.Contains(it.ContentHTML, want) || strings.Contains(it.ContentHTML, "pending") {
+		t.Errorf("content = %s", it.ContentHTML)
+	}
+}
+
+func TestDiffURL(t *testing.T) {
+	for _, tc := range []struct{ html, prev, tag, want string }{
+		{"https://github.com/o/r/releases/tag/v2", "v1", "v2", "https://github.com/o/r/compare/v1...v2"},
+		{"https://ghe.example/o/r/releases/tag/b%20c", "a b", "b c", "https://ghe.example/o/r/compare/a%20b...b%20c"},
+		{"https://github.com/o/r/releases/tag/v1", "", "v1", ""},
+		{"https://example.com/elsewhere", "v1", "v2", ""},
+	} {
+		if got := DiffURL(&store.Release{HTMLURL: tc.html, PrevTag: tc.prev, Tag: tc.tag}); got != tc.want {
+			t.Errorf("DiffURL(%q, %q) = %q, want %q", tc.prev, tc.tag, got, tc.want)
+		}
 	}
 }

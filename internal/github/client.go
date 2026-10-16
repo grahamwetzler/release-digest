@@ -1,6 +1,6 @@
 // Package github is the REST client for public repos: visibility checks,
-// releases, tags, commit dates and existence checks, with an ETag cache and
-// rate-limit pacing (PLAN.md §3.1).
+// releases, tags, commit dates, existence checks, file contents and
+// comparisons, with an ETag cache and rate-limit pacing (PLAN.md §3.1, §3.2).
 package github
 
 import (
@@ -112,9 +112,21 @@ type response struct {
 	Cached bool // a 304 answered from the cache
 }
 
-// get fetches path (relative to BaseURL), conditionally when cache is set.
-// A 404 is ErrNotFound; any other non-2xx is a StatusError or RateLimitError.
+// get fetches path (relative to BaseURL) as JSON, conditionally when cache
+// is set. A 404 is ErrNotFound; any other non-2xx is a StatusError or
+// RateLimitError.
 func (c *Client) get(ctx context.Context, path string, timeout time.Duration, token secret.String, cache bool) (*response, error) {
+	return c.getAs(ctx, path, mediaJSON, timeout, token, cache)
+}
+
+// Media types for the Accept header.
+const (
+	mediaJSON = "application/vnd.github+json"
+	mediaRaw  = "application/vnd.github.raw+json" // a file's contents, as is
+)
+
+// getAs is get with the response media type set by accept.
+func (c *Client) getAs(ctx context.Context, path, accept string, timeout time.Duration, token secret.String, cache bool) (*response, error) {
 	u := c.BaseURL + path
 	var entry *store.CacheEntry
 	if cache && c.Cache != nil {
@@ -127,7 +139,7 @@ func (c *Client) get(ctx context.Context, path string, timeout time.Duration, to
 		if err := c.waitForLimit(ctx); err != nil {
 			return nil, err
 		}
-		resp, err := c.do(ctx, u, timeout, token, entry)
+		resp, err := c.do(ctx, u, accept, timeout, token, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -163,7 +175,7 @@ type rawResponse struct {
 	body   []byte
 }
 
-func (c *Client) do(ctx context.Context, u string, timeout time.Duration, token secret.String, entry *store.CacheEntry) (*rawResponse, error) {
+func (c *Client) do(ctx context.Context, u, accept string, timeout time.Duration, token secret.String, entry *store.CacheEntry) (*rawResponse, error) {
 	if timeout <= 0 {
 		timeout = c.Timeout
 	}
@@ -176,7 +188,7 @@ func (c *Client) do(ctx context.Context, u string, timeout time.Duration, token 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", c.UserAgent)
 	if !token.IsZero() {
@@ -435,6 +447,106 @@ func (c *Client) Exists(ctx context.Context, repo, kind, tag string) (bool, erro
 		return false, err
 	}
 	return true, nil
+}
+
+// Entry is one entry of a directory listing.
+type Entry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Type string `json:"type"` // file | dir | symlink | submodule
+}
+
+// contentsPath is the contents URL of path at ref; an empty ref is the
+// default branch.
+func contentsPath(repo, path, ref string) string {
+	p := repoPath(repo) + "/contents"
+	if path != "" {
+		p += "/" + refPath(path)
+	}
+	if ref != "" {
+		p += "?ref=" + url.QueryEscape(ref)
+	}
+	return p
+}
+
+// Dir lists the repo's root directory at ref, or at the default branch if
+// ref is empty. Only the default branch, which moves, uses the ETag cache;
+// a tag's tree never changes and is read once.
+func (c *Client) Dir(ctx context.Context, repo, ref string) ([]Entry, error) {
+	resp, err := c.get(ctx, contentsPath(repo, "", ref), 0, c.token(), ref == "")
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return nil, fmt.Errorf("%s: listing the root directory: %w", repo, err)
+	}
+	return out, nil
+}
+
+// File returns the contents of the file at path and ref (the default branch
+// if ref is empty), caching like Dir.
+func (c *Client) File(ctx context.Context, repo, path, ref string) (string, error) {
+	resp, err := c.getAs(ctx, contentsPath(repo, path, ref), mediaRaw, 0, c.token(), ref == "")
+	if err != nil {
+		return "", err
+	}
+	return string(resp.Body), nil
+}
+
+// Comparison is the commit range between two refs.
+type Comparison struct {
+	Status       string // ahead | behind | diverged | identical
+	TotalCommits int
+	Commits      []Commit // oldest first; the API returns at most 250
+}
+
+// Commit is one commit of a comparison.
+type Commit struct {
+	SHA        string
+	Message    string
+	Login      string // the GitHub author, if linked
+	AuthorType string // User | Bot, if linked
+	AuthorName string // the git author name
+	Parents    int
+}
+
+// Compare compares base...head (§3.2, compare fallback).
+func (c *Client) Compare(ctx context.Context, repo, base, head string) (*Comparison, error) {
+	var v struct {
+		Status       string `json:"status"`
+		TotalCommits int    `json:"total_commits"`
+		Commits      []struct {
+			SHA    string `json:"sha"`
+			Commit struct {
+				Message string `json:"message"`
+				Author  struct {
+					Name string `json:"name"`
+				} `json:"author"`
+			} `json:"commit"`
+			Author *struct {
+				Login string `json:"login"`
+				Type  string `json:"type"`
+			} `json:"author"`
+			Parents []json.RawMessage `json:"parents"`
+		} `json:"commits"`
+	}
+	resp, err := c.get(ctx, repoPath(repo)+"/compare/"+refPath(base)+"..."+refPath(head), 0, c.token(), false)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(resp.Body, &v); err != nil {
+		return nil, fmt.Errorf("%s: comparing %s...%s: %w", repo, base, head, err)
+	}
+	out := &Comparison{Status: v.Status, TotalCommits: v.TotalCommits}
+	for _, cm := range v.Commits {
+		x := Commit{SHA: cm.SHA, Message: cm.Commit.Message, AuthorName: cm.Commit.Author.Name, Parents: len(cm.Parents)}
+		if cm.Author != nil {
+			x.Login, x.AuthorType = cm.Author.Login, cm.Author.Type
+		}
+		out.Commits = append(out.Commits, x)
+	}
+	return out, nil
 }
 
 // GuardError is a token that fails the token guard: it can obviously read

@@ -160,6 +160,14 @@ var migrations = []string{
 	ALTER TABLE releases ADD COLUMN meta_attempted_at INTEGER;
 	ALTER TABLE repo_state ADD COLUMN scan_mode TEXT NOT NULL DEFAULT '';  -- release | tag: the list last scanned
 	CREATE INDEX releases_undated ON releases (meta_attempted_at) WHERE published_at IS NULL;`,
+	// 3: notes resolution (§3.2). body_hash keeps the release body apart from
+	// the notes chosen for it; unresolved rows queue for resolution, and every
+	// existing row is re-resolved once.
+	`ALTER TABLE releases ADD COLUMN body_hash TEXT NOT NULL DEFAULT '';        -- → notes.hash: the release body as published
+	ALTER TABLE releases ADD COLUMN notes_resolved INTEGER NOT NULL DEFAULT 0; -- 1 once §3.2 chose notes_source (or none)
+	ALTER TABLE releases ADD COLUMN resolve_attempted_at INTEGER;
+	UPDATE releases SET body_hash = notes_hash WHERE notes_source = 'release_body';
+	CREATE INDEX releases_unresolved ON releases (resolve_attempted_at) WHERE notes_resolved = 0;`,
 }
 
 // Open opens (creating if needed) the database at path and migrates it.
@@ -262,24 +270,28 @@ type Release struct {
 	NotesHash      string // → notes.hash
 	LastVerified   time.Time
 	VerifyAttempt  time.Time
+	BodyHash       string // → notes.hash: the release body; "" for none
+	NotesResolved  bool   // notes_source is final: "" then means no notes (§3.2)
+	ResolveAttempt time.Time
 }
 
 const releaseColumns = `repo, tag, guid, kind, name, html_url, stream, version, prev_tag, prerelease,
 	published_at, first_seen_at, state, notes_source, origin, urgency, content_updated_at, missing_since, next_attempt_at,
-	ref_sha, ref_type, notes_hash, last_verified_at, verify_attempted_at`
+	ref_sha, ref_type, notes_hash, last_verified_at, verify_attempted_at, body_hash, notes_resolved, resolve_attempted_at`
 
 func scanRelease(row interface{ Scan(...any) error }) (*Release, error) {
 	var r Release
-	var published, contentUpdated, missing, verified, attempted sql.NullInt64
+	var published, contentUpdated, missing, verified, attempted, resolveAttempt sql.NullInt64
 	var firstSeen, nextAttempt int64
 	err := row.Scan(&r.Repo, &r.Tag, &r.GUID, &r.Kind, &r.Name, &r.HTMLURL, &r.Stream, &r.Version, &r.PrevTag,
 		&r.Prerelease, &published, &firstSeen, &r.State, &r.NotesSource, &r.Origin, &r.Urgency, &contentUpdated,
-		&missing, &nextAttempt, &r.RefSHA, &r.RefType, &r.NotesHash, &verified, &attempted)
+		&missing, &nextAttempt, &r.RefSHA, &r.RefType, &r.NotesHash, &verified, &attempted,
+		&r.BodyHash, &r.NotesResolved, &resolveAttempt)
 	if err != nil {
 		return nil, err
 	}
 	r.Published, r.ContentUpdated, r.MissingSince = fromNull(published), fromNull(contentUpdated), fromNull(missing)
-	r.LastVerified, r.VerifyAttempt = fromNull(verified), fromNull(attempted)
+	r.LastVerified, r.VerifyAttempt, r.ResolveAttempt = fromNull(verified), fromNull(attempted), fromNull(resolveAttempt)
 	r.FirstSeen, r.NextAttempt = fromMS(firstSeen), fromMS(nextAttempt)
 	return &r, nil
 }
@@ -295,12 +307,13 @@ func (s ops) InsertRelease(ctx context.Context, r *Release) (bool, error) {
 		r.Urgency = "none"
 	}
 	res, err := s.q.ExecContext(ctx, `INSERT INTO releases (`+releaseColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (repo, tag) DO NOTHING`,
 		r.Repo, r.Tag, r.GUID, r.Kind, r.Name, r.HTMLURL, r.Stream, r.Version, r.PrevTag, r.Prerelease,
 		toNull(r.Published), toMS(r.FirstSeen), r.State, r.NotesSource, r.Origin, r.Urgency,
 		toNull(r.ContentUpdated), toNull(r.MissingSince), toMS(r.NextAttempt),
-		r.RefSHA, r.RefType, r.NotesHash, toNull(r.LastVerified), toNull(r.VerifyAttempt))
+		r.RefSHA, r.RefType, r.NotesHash, toNull(r.LastVerified), toNull(r.VerifyAttempt),
+		r.BodyHash, r.NotesResolved, toNull(r.ResolveAttempt))
 	if err != nil {
 		return false, err
 	}

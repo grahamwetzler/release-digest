@@ -14,10 +14,10 @@
     <item>
       <title>astral-sh/uv 0.9.4</title>
       <link>https://github.com/astral-sh/uv/releases/tag/0.9.4</link>
-      <description>Highlights Faster lockfile resolution for workspaces &amp;amp; more Fixed uv sync on Windows</description>
-      <content:encoded><![CDATA[<p>Highlights Faster lockfile resolution for workspaces &amp; more Fixed uv sync on Windows</p>
-<p><a href="https://github.com/astral-sh/uv/releases/tag/0.9.4">Full release notes</a></p>
-<p><small>Summary pending.</small></p>]]></content:encoded>
+      <description>Highlights • Faster lockfile resolution for workspaces &amp;amp; more • Fixed uv sync on Windows</description>
+      <content:encoded><![CDATA[<p>Highlights • Faster lockfile resolution for workspaces &amp; more • Fixed uv sync on Windows</p>
+<p><a href="https://github.com/astral-sh/uv/releases/tag/0.9.4">Full release notes</a> · <a href="https://github.com/astral-sh/uv/compare/0.9.3...0.9.4">Diff since 0.9.3</a></p>
+<p><small>Summary pending. Excerpt from the release notes.</small></p>]]></content:encoded>
       <category>astral-sh/uv</category>
       <pubDate>Thu, 15 Oct 2026 12:00:00 +0000</pubDate>
       <guid isPermaLink="false">13675a19-6025-50cc-beb9-5a423ff36c63</guid>
@@ -25,9 +25,9 @@
     <item>
       <title>aws/aws-sdk-go-v2 service/s3/v1.2.3</title>
       <link>https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3</link>
-      <description>Tag for aws/aws-sdk-go-v2 service/s3/v1.2.3.</description>
-      <content:encoded><![CDATA[<p><a href="https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3">Tag</a></p>
-<p><small>Summary pending.</small></p>]]></content:encoded>
+      <description>aws/aws-sdk-go-v2 service/s3/v1.2.3 released — no release notes published.</description>
+      <content:encoded><![CDATA[<p>aws/aws-sdk-go-v2 service/s3/v1.2.3 released — no release notes published.</p>
+<p><a href="https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3">Tag</a> · <a href="https://github.com/aws/aws-sdk-go-v2/compare/service/s3/v1.2.2...service/s3/v1.2.3">Diff since service/s3/v1.2.2</a></p>]]></content:encoded>
       <category>aws/aws-sdk-go-v2</category>
       <pubDate>Wed, 14 Oct 2026 12:00:00 +0000</pubDate>
       <guid isPermaLink="false">f5e760ae-d7bf-5704-b4e8-7ac51a0ca91d</guid>

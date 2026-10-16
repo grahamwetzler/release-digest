@@ -103,7 +103,7 @@ func TestBuildPollsGitHubAndPublishesFallbacks(t *testing.T) {
 	}
 	defer st.Close()
 	rss, _ := st.Rendered(context.Background(), "feed.xml")
-	if rss == nil || !strings.Contains(string(rss.Bytes), "Fixes Faster startup") {
+	if rss == nil || !strings.Contains(string(rss.Bytes), "Fixes • Faster startup") {
 		t.Errorf("feed lacks the notes excerpt:\n%s", rss.Bytes)
 	}
 	if !strings.Contains(errb.String(), "checked for obvious private-repo access only") {

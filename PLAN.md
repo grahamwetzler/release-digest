@@ -64,8 +64,8 @@ There is one long-lived process. Each scheduler tick runs three stages: a **poll
 
 **Bounded passes:** no single slow repo or flaky upstream can stall the feed.
 
-- **Each stage has its own budget**, so neither can starve the other: `schedule.poll_budget` (default 7m) and `schedule.summarize_budget` (default 7m). A stage that hits its budget stops, and its unfinished work stays persisted for the next tick. The summarize stage always runs after poll, whatever poll's outcome, so the LLM makes progress even if GitHub eats its full allowance every tick. Render runs outside both budgets. Every GitHub and LLM request has its own timeout (`github.request_timeout`, default 20s; `llm.timeout`). Budgets are checked between units of work, so the maximum overrun is one unit. For poll, the largest unit is one repo's visibility check plus its atomic catch-up scan: at most (1 + `max_pages`) × `request_timeout` = 2m worst case. Reconciliation, metadata and existence checks are checked page by page or item by item, so each adds at most one request.
-- **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback` (§3.3), so fallback publication never waits on the LLM. It does wait for a fresh public confirmation of the repo (§3.1, processing gate).
+- **Each stage has its own budget**, so neither can starve the other: `schedule.poll_budget` (default 7m) and `schedule.summarize_budget` (default 7m). A stage that hits its budget stops, and its unfinished work stays persisted for the next tick. The summarize stage always runs after poll, whatever poll's outcome, so the LLM makes progress even if GitHub eats its full allowance every tick. Render runs outside both budgets. Every GitHub and LLM request has its own timeout (`github.request_timeout`, default 20s; `llm.timeout`). Budgets are checked between units of work, so the maximum overrun is one unit. For poll, the largest unit is one repo's visibility check plus its atomic catch-up scan: at most (1 + `max_pages`) × `request_timeout` = 2m worst case. Reconciliation, metadata and existence checks are checked page by page or item by item, so each adds at most one request. Notes resolution is checked between releases, so it adds at most one release's lookups: five requests.
+- **Render always runs**, even when poll or summarize errored or ran out of budget. The render step promotes `pending` releases past `publish_after` to `fallback`, and releases whose notes resolved to none to `no_notes` at once (§3.3), so fallback publication never waits on the LLM. It does wait for a fresh public confirmation of the repo (§3.1, processing gate).
 - Render also runs after every 5 completed summaries, so a long summarize pass publishes as it goes.
 
 **Visibility first.** Every tick begins with a **visibility sweep** that checks *all* repos (§3.1 step 0) before any other work. Unchanged repos return 304s, which cost no rate limit. The sweep runs 8 at a time, with a 10s timeout per request and its own **`schedule.sweep_budget`** (default 2m). Any repo not confirmed when the budget runs out is **unverified** for this tick: the gate treats it like a failed check, and it's simply retried next tick. A few slow repos therefore delay only themselves, never the feed. The sweep starts from a persisted **sweep cursor**, the repo after the last one it *attempted*, whatever the outcome. So repos that time out rotate to the back, and every repo is reached within ⌈repos ÷ repos-per-sweep⌉ ticks even if some always time out. The result is recorded as `visibility_confirmed_tick`.
@@ -163,14 +163,24 @@ This step produces the raw text the LLM sees. It is deterministic and unit-teste
 | Situation | Notes source |
 |---|---|
 | Release with a substantive body | The release body (Markdown) |
-| Release body empty, under ~40 chars, or matching `see (the )?changelog\|CHANGELOG\.md` | The matching section of the changelog file |
+| Release body empty, under 40 chars, or matching `see (the )?changelog\|CHANGELOG\.md` | The matching section of the changelog file |
 | Tag only | The matching section of the changelog file |
-| No changelog section found, predecessor known | Commit subjects from `GET /compare/{prev}...{tag}`, capped at 100, with merge commits and `chore(deps)`/bot authors dropped |
+| No changelog section, but a body of 40+ chars that pointed at one | The release body |
+| No changelog section found, predecessor known | Commit subjects from `GET /compare/{prev}...{tag}`, newest first, capped at 100, with merge commits, `chore(deps)`/`build(deps)` subjects and bot authors dropped |
+| A short body that isn't only a pointer, such as "Bug fixes." | The release body |
 | None of the above | **No notes**: no LLM call. The item is published deterministically as "{repo} {version} released — no release notes published", with links (state `no_notes`) |
 
-The compare fallback is also treated as "none of the above" in four cases: the predecessor is unknown (a repo's first version), either ref is gone (404), the comparison is diverged or has more than 250 commits (an unrelated predecessor is likely), or every commit is filtered out as noise.
+The rows are tried in order. Lengths are measured after removing GitHub's generated `**Full Changelog**: <compare URL>` line, which is all a generated body has when no pull requests were merged.
 
-**Changelog lookup:** the path is configurable per repo, with a default search of `CHANGELOG.md`, `CHANGES.md`, `HISTORY.md` and `NEWS.md` at the tag's ref. The section is found by scanning Markdown headings for the version, with or without a leading `v`. Both ATX headings (`#`–`###`) and setext headings (a line underlined with `===` or `---`, treated as levels 1 and 2) count. The section runs to the next heading of the same or higher level. Fetched files are cached per (repo, ref).
+The compare fallback is also treated as "none of the above" in four cases: the predecessor is unknown (a repo's first version), either ref is gone (404), the comparison is diverged, behind, identical or has more than 250 commits (an unrelated predecessor is likely), or every commit is filtered out as noise.
+
+**Changelog lookup:** the path is configurable per repo. The default (`auto`) lists the repo's root directory and takes the first of `CHANGELOG.md`, `CHANGES.md`, `HISTORY.md` and `NEWS.md`, ignoring case. The file is read at the tag's ref and, if it has no section there, at the default branch, since some projects write the section after tagging. The section is found by scanning Markdown headings outside fenced code for the version, with or without a leading `v`, or for the whole tag (`go1.25.1`). The match must be a whole version: `1.2.3` doesn't match `1.2.30`, `11.2.3` or `1.2.3-rc.1`, and link targets in a heading are ignored, so `[1.2.3](…/compare/v1.2.2...v1.2.3)` isn't a `1.2.2` heading. Both ATX headings (`#`–`###`) and setext headings (a line underlined with `===` or `---`, treated as levels 1 and 2) count. The section runs to the next heading of the same or higher level; an empty section counts as none. Date-ordered tags have no version, so they skip the changelog. A tag's tree never changes, so it's read once without the ETag cache; the default branch's root listing and changelog use the cache and are read at most once per pass per repo.
+
+**Resolution queue:** a substantive body is resolved when the row is inserted, with no request. Every other `pending` or `fallback` row with a known date is queued (`notes_resolved = 0`). Within the poll budget, after the metadata queue, up to 30 queued rows per tick are resolved in repos confirmed this tick: never-attempted rows first, then the least recently attempted. Any failure other than a 404, such as a 5xx or a timeout, records the attempt and leaves the row queued, so a transient failure never resolves to "no notes"; a rate limit ends the stage without counting as an attempt. Until it resolves, a release body that isn't substantive serves as provisional notes for a fallback excerpt.
+
+- **Edits.** A release body edited on a `pending`, `fallback` or `no_notes` row (`body_hash` changes) queues the row again; a `summarized` row only changes through `resummarize`. Visible rows keep their content until the new resolution completes.
+- **Rechecks.** A `no_notes` release published within the publish window (`max(7d, notify.max_age)`) is rechecked once a day, after the queued rows, in case a changelog section appeared.
+- **Outcomes.** Notes on a `no_notes` row move it to `fallback`. No notes on a `fallback` row move it to `no_notes`. A `pending` row with no notes is promoted to `no_notes` at the next render, without waiting for `publish_after`, since there is no LLM call to wait for. Promotion is the only way into the feed, so it keeps the just-in-time public check (§3.1). New notes make a row due for summarizing at once.
 
 #### 3.2.1 Predecessor selection
 
@@ -183,7 +193,7 @@ The compare fallback is also treated as "none of the above" in four cases: the p
 
 **Input budget:** notes are truncated to `llm.max_input_chars` (default 24,000) at a heading or line boundary, with a "[truncated]" marker. Some changelogs, Kubernetes for example, are enormous.
 
-The resolved text, its source (`release_body` / `changelog` / `compare`) and its SHA-256 are stored on the release row.
+The resolved text is stored once in `notes`, keyed by its SHA-256, and the release row records the hash and source (`release_body` / `changelog` / `compare`). The release body is stored the same way (`body_hash`), apart from the notes chosen for it, so an edit can be detected and a later resolution can still use it.
 
 ### 3.3 Summarize (LLM)
 
@@ -218,7 +228,7 @@ The resolved text, its source (`release_body` / `changelog` / `compare`) and its
 | State | In feed? | Summarize-eligible? | Transitions |
 |---|---|---|---|
 | `skipped` | no | no | terminal: backfill, filter or catch-up overflow |
-| `pending` | no | yes, when `next_attempt_at ≤ now`. Rows are inserted with `next_attempt_at = first_seen_at`, and the column is `NOT NULL`, so a new release is eligible immediately | → `summarized` on success; → `fallback` at render time once `now − first_seen_at ≥ llm.publish_after` (default 6h); → `no_notes` when notes resolve to none |
+| `pending` | no | yes, when `next_attempt_at ≤ now`. Rows are inserted with `next_attempt_at = first_seen_at`, and the column is `NOT NULL`, so a new release is eligible immediately | → `summarized` on success; → `fallback` at render time once `now − first_seen_at ≥ llm.publish_after` (default 6h); → `no_notes` at render time once notes resolve to none |
 | `fallback` | yes, excerpt | yes, when `next_attempt_at ≤ now` (no age cutoff) | → `summarized` on success; content updates, identity doesn't. → `no_notes` when resolution (§3.2) completes and finds no usable notes. This happens when render promoted the item before resolution had finished. A *transient* resolution failure (an error, a rate limit) is not "no notes": the item stays `fallback` and retries |
 | `summarized` | yes | no | → re-summarized only by `resummarize` |
 | `no_notes` | yes, deterministic | no | → `fallback` when a later poll finds notes (the release body was edited or a changelog section appeared). It stays in the feed and becomes eligible immediately |
@@ -503,7 +513,7 @@ Rules:
 <p><small>Summarized by qwen3:14b from the release notes.</small></p>
 ```
 
-Empty sections are omitted. The footer names the model and notes source (`release notes` / `CHANGELOG.md` / `commit log`) for transparency.
+Empty sections are omitted. The footer names the model and notes source (`release notes` / `CHANGELOG.md` / `commit log`) for transparency. A fallback item instead shows the excerpt, the same links, and "Summary pending. Excerpt from the release notes / the changelog / the commit log." A `no_notes` item says "{repo} {version} released — no release notes published" above the links.
 
 **Categories:** `owner/repo`, plus `breaking`, `security` and `prerelease` when they apply. Feed readers can then filter one combined feed by repo.
 
@@ -638,6 +648,9 @@ CREATE TABLE releases (
   ref_sha        TEXT NOT NULL DEFAULT '',  -- tags: the object refs/tags/<tag> points at
   ref_type       TEXT NOT NULL DEFAULT '',  -- commit | tag (annotated)
   meta_attempted_at INTEGER,                -- metadata queue order (§3.1 step 2)
+  body_hash      TEXT NOT NULL DEFAULT '',  -- → notes.hash: the release body as published (§3.2)
+  notes_resolved INTEGER NOT NULL DEFAULT 0, -- 1 once notes_source is final ('' then means no notes)
+  resolve_attempted_at INTEGER,             -- resolution queue order (§3.2)
   PRIMARY KEY (repo, tag)
 );
 CREATE INDEX releases_feed ON releases (state, published_at DESC);

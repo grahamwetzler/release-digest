@@ -194,15 +194,71 @@ func (s ops) Notes(ctx context.Context, hash string) (string, error) {
 	return text, err
 }
 
-// SetPendingNotes replaces the release-body notes of a release that isn't
-// visible yet, for a body edited after discovery (an empty source and hash
-// clear them). Visible rows are left alone: their content changes only
-// through the transitions in §3.3. Notes from another source are kept.
-func (s ops) SetPendingNotes(ctx context.Context, repo, tag, source, hash string) error {
-	_, err := s.q.ExecContext(ctx, `UPDATE releases SET notes_source = ?, notes_hash = ?
-		WHERE repo = ? AND tag = ? AND state = ? AND notes_source IN ('', 'release_body')`,
-		source, hash, repo, tag, StatePending)
+// SetBody records an edited release body (bodyHash, "" for an empty body)
+// on a row whose notes may still change: pending, fallback or no_notes.
+// The row's notes go back to unresolved; a pending row, which isn't
+// visible, also takes src and hash as provisional notes. Visible rows keep
+// their content until resolution (§3.3). It reports whether the body changed.
+func (s ops) SetBody(ctx context.Context, repo, tag, bodyHash, src, hash string) (bool, error) {
+	res, err := s.q.ExecContext(ctx, `UPDATE releases SET body_hash = ?1, notes_resolved = 0, resolve_attempted_at = NULL,
+			notes_source = CASE WHEN state = ?4 THEN ?2 ELSE notes_source END,
+			notes_hash = CASE WHEN state = ?4 THEN ?3 ELSE notes_hash END
+		WHERE repo = ?5 AND tag = ?6 AND body_hash != ?1 AND state IN (?4, ?7, ?8)`,
+		bodyHash, src, hash, StatePending, repo, tag, StateFallback, StateNoNotes)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ResolveNotes records resolved notes (§3.2, §3.3). With notes (src set), a
+// no_notes row returns to fallback; without (src ""), a fallback row becomes
+// no_notes. A visible row whose content changes gets content_updated_at, and
+// a row with new notes is due for summarizing at once.
+func (s ops) ResolveNotes(ctx context.Context, repo, tag, src, hash string, at time.Time) error {
+	var q string
+	if src != "" {
+		q = `UPDATE releases SET
+			content_updated_at = CASE WHEN state = ?3 OR (state = ?2 AND notes_hash != ?5) THEN ?6 ELSE content_updated_at END,
+			next_attempt_at = CASE WHEN state = ?3 OR notes_hash != ?5 THEN ?6 ELSE next_attempt_at END,
+			state = CASE WHEN state = ?3 THEN ?2 ELSE state END,
+			notes_source = ?4, notes_hash = ?5, notes_resolved = 1, resolve_attempted_at = ?6
+			WHERE repo = ?7 AND tag = ?8 AND state IN (?1, ?2, ?3)`
+	} else {
+		q = `UPDATE releases SET
+			content_updated_at = CASE WHEN state = ?2 THEN ?6 ELSE content_updated_at END,
+			state = CASE WHEN state = ?2 THEN ?3 ELSE state END,
+			notes_source = ?4, notes_hash = ?5, notes_resolved = 1, resolve_attempted_at = ?6
+			WHERE repo = ?7 AND tag = ?8 AND state IN (?1, ?2, ?3)`
+	}
+	_, err := s.q.ExecContext(ctx, q, StatePending, StateFallback, StateNoNotes, src, hash, toMS(at), repo, tag)
 	return err
+}
+
+// ResolveAttempted records a resolution attempt that failed.
+func (s ops) ResolveAttempted(ctx context.Context, repo, tag string, at time.Time) error {
+	_, err := s.q.ExecContext(ctx, `UPDATE releases SET resolve_attempted_at = ? WHERE repo = ? AND tag = ?`, toMS(at), repo, tag)
+	return err
+}
+
+// UnresolvedNotes returns up to n rows due for notes resolution in repos
+// confirmed in tick (§3.2): dated pending and fallback rows whose notes
+// aren't resolved, then no_notes rows published since recent and not tried
+// since retry, which are rechecked in case notes appeared. Within each
+// group, rows never attempted come first, then the least recently attempted.
+func (s ops) UnresolvedNotes(ctx context.Context, tick int64, n int, recent, retry time.Time) ([]*Release, error) {
+	rows, err := s.q.QueryContext(ctx, `SELECT `+prefixed("r.")+` FROM releases r
+		JOIN repo_state rs ON rs.repo = r.repo AND rs.visibility_confirmed_tick = ?1 AND rs.held = 0
+		WHERE r.published_at IS NOT NULL AND (
+			(r.notes_resolved = 0 AND r.state IN (?2, ?3))
+			OR (r.state = ?4 AND r.published_at > ?5 AND (r.resolve_attempted_at IS NULL OR r.resolve_attempted_at <= ?6)))
+		ORDER BY r.state = ?4, r.resolve_attempted_at IS NOT NULL, r.resolve_attempted_at, r.first_seen_at, r.repo, r.tag
+		LIMIT ?7`, tick, StatePending, StateFallback, StateNoNotes, toMS(recent), toMS(retry), n)
+	if err != nil {
+		return nil, err
+	}
+	return scanReleases(rows)
 }
 
 // UndatedTags returns up to n tag rows whose commit date is unknown, in
@@ -281,11 +337,13 @@ func (s ops) RecordVerify(ctx context.Context, repo, tag string, outcome int, at
 	return err
 }
 
-// DuePromotions returns pending rows with a known date first seen at or
-// before cutoff: due to be published as fallbacks (§3.3).
+// DuePromotions returns pending rows with a known date that are due to be
+// published (§3.3): first seen at or before cutoff, or resolved to no
+// notes, which has nothing to wait for.
 func (s ops) DuePromotions(ctx context.Context, cutoff time.Time) ([]*Release, error) {
 	rows, err := s.q.QueryContext(ctx, `SELECT `+releaseColumns+` FROM releases
-		WHERE state = ? AND published_at IS NOT NULL AND first_seen_at <= ? ORDER BY repo, first_seen_at, tag`,
+		WHERE state = ? AND published_at IS NOT NULL AND (first_seen_at <= ? OR (notes_resolved = 1 AND notes_source = ''))
+		ORDER BY repo, first_seen_at, tag`,
 		StatePending, toMS(cutoff))
 	if err != nil {
 		return nil, err
@@ -293,10 +351,13 @@ func (s ops) DuePromotions(ctx context.Context, cutoff time.Time) ([]*Release, e
 	return scanReleases(rows)
 }
 
-// Promote publishes a pending row as a fallback, making it visible.
+// Promote publishes a pending row, making it visible: as no_notes if its
+// notes resolved to none, else as a fallback.
 func (s ops) Promote(ctx context.Context, repo, tag string, at time.Time) error {
-	_, err := s.q.ExecContext(ctx, `UPDATE releases SET state = ?, content_updated_at = ? WHERE repo = ? AND tag = ? AND state = ?`,
-		StateFallback, toMS(at), repo, tag, StatePending)
+	_, err := s.q.ExecContext(ctx, `UPDATE releases SET
+		state = CASE WHEN notes_resolved = 1 AND notes_source = '' THEN ? ELSE ? END, content_updated_at = ?
+		WHERE repo = ? AND tag = ? AND state = ?`,
+		StateNoNotes, StateFallback, toMS(at), repo, tag, StatePending)
 	return err
 }
 

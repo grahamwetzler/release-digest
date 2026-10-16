@@ -1,9 +1,11 @@
 // Package poll is the GitHub stage of a tick: the visibility sweep, the
-// per-repo scans, reconciliation, the tag metadata queue, deletion checks,
-// and the gated pending → fallback promotion at render time (PLAN.md §3, §3.1).
+// per-repo scans, reconciliation, the tag metadata queue, notes resolution,
+// deletion checks, and the gated promotion at render time (PLAN.md §3,
+// §3.1, §3.2).
 package poll
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"release-digest/internal/config"
 	"release-digest/internal/github"
 	"release-digest/internal/ident"
+	"release-digest/internal/notes"
 	"release-digest/internal/store"
 	"release-digest/internal/version"
 )
@@ -29,6 +32,8 @@ const (
 	SweepConcurrency = 8
 	SweepTimeout     = 10 * time.Second
 	MetadataPerTick  = 30
+	ResolvePerTick   = 30
+	NotesRecheck     = 24 * time.Hour // how often a recent no_notes release is rechecked
 	ReconcileEvery   = 24 * time.Hour
 	ReconcileExtra   = 5 // reconcile_pages = max_pages + 5
 	MinPublishWindow = 7 * 24 * time.Hour
@@ -184,8 +189,8 @@ func (p *Poller) checkNow(ctx context.Context, repo string, tick int64, during s
 }
 
 // Poll polls repos round-robin from the persisted cursor within poll_budget,
-// then drains the tag metadata queue and runs the rotating deletion checks
-// (§3.1). The budget is checked between repos, pages of a reconciliation,
+// then drains the tag metadata queue, resolves notes and runs the rotating
+// deletion checks (§3.1, §3.2). The budget is checked between repos, pages of a reconciliation,
 // and queue items; a repo's scan, once started, always finishes. Only store
 // failures are returned; GitHub failures are logged and recorded per repo.
 func (p *Poller) Poll(ctx context.Context, tick int64) error {
@@ -200,6 +205,9 @@ func (p *Poller) Poll(ctx context.Context, tick int64) error {
 		return nil
 	}
 	if err := p.drainMetadata(ctx, tick, b); err != nil || b.stopped {
+		return err
+	}
+	if err := p.resolveNotes(ctx, tick, b); err != nil || b.stopped {
 		return err
 	}
 	return p.verifySweep(ctx, tick, b)
@@ -642,25 +650,34 @@ func (p *Poller) filtered(r *config.Repo, row *store.Release) bool {
 	return false
 }
 
-// bodyNotes stores a release body as notes, returning the source and hash;
-// an empty body is no notes.
-func bodyNotes(ctx context.Context, tx *store.Tx, body string) (string, string, error) {
+// bodyNotes records a release body on a new row. A substantive body is
+// the notes, resolved at once with no request; any other body is
+// provisional notes until the resolution queue decides (§3.2).
+func (p *Poller) bodyNotes(ctx context.Context, tx *store.Tx, row *store.Release, body string) error {
 	body = strings.TrimSpace(body)
 	if body == "" {
-		return "", "", nil
+		return nil
 	}
 	h, err := tx.PutNotes(ctx, body)
-	return "release_body", h, err
+	if err != nil {
+		return err
+	}
+	row.BodyHash, row.NotesSource, row.NotesHash = h, notes.SourceBody, h
+	if res, ok := notes.FromBody(body, p.Cfg.LLM.MaxInputChars); ok {
+		if row.NotesHash, err = tx.PutNotes(ctx, res.Text); err != nil {
+			return err
+		}
+		row.NotesResolved = true
+	}
+	return nil
 }
 
 // insert stores a new row with its notes. For a row already stored, it
-// refreshes the notes of a release that isn't visible yet.
+// applies an edited body instead.
 func (p *Poller) insert(ctx context.Context, tx *store.Tx, row *store.Release, e entry) (bool, error) {
-	src, h, err := bodyNotes(ctx, tx, e.Body)
-	if err != nil {
+	if err := p.bodyNotes(ctx, tx, row, e.Body); err != nil {
 		return false, err
 	}
-	row.NotesSource, row.NotesHash = src, h
 	ok, err := tx.InsertRelease(ctx, row)
 	if err != nil || ok {
 		return ok, err
@@ -669,16 +686,21 @@ func (p *Poller) insert(ctx context.Context, tx *store.Tx, row *store.Release, e
 }
 
 // refreshNotes applies an edited release body, including one edited to
-// empty, to a stored release that isn't visible yet.
+// empty, to a stored release whose notes may still change: the notes are
+// resolved again, at once if the new body is substantive (§3.3).
 func (p *Poller) refreshNotes(ctx context.Context, tx *store.Tx, repo string, e entry) error {
 	if e.Kind != "release" {
 		return nil
 	}
-	src, h, err := bodyNotes(ctx, tx, e.Body)
-	if err != nil {
+	var row store.Release
+	if err := p.bodyNotes(ctx, tx, &row, e.Body); err != nil {
 		return err
 	}
-	return tx.SetPendingNotes(ctx, repo, e.Tag, src, h)
+	changed, err := tx.SetBody(ctx, repo, e.Tag, row.BodyHash, row.NotesSource, row.NotesHash)
+	if err != nil || !changed || !row.NotesResolved {
+		return err
+	}
+	return tx.ResolveNotes(ctx, repo, e.Tag, row.NotesSource, row.NotesHash, p.now())
 }
 
 // setPredecessors records prev_tag for newly inserted, non-skipped rows from
@@ -942,6 +964,62 @@ func (p *Poller) drainMetadata(ctx context.Context, tick int64, b *budget) error
 		})
 		if err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// resolveNotes works the notes resolution queue (§3.2): unresolved
+// pending and fallback rows, then recent no_notes rows due for a recheck,
+// at most ResolvePerTick per tick. A failure leaves the row as it was, to
+// be retried; only a completed resolution can mean "no notes".
+func (p *Poller) resolveNotes(ctx context.Context, tick int64, b *budget) error {
+	now := p.now()
+	rows, err := p.Store.UnresolvedNotes(ctx, tick, ResolvePerTick, now.Add(-p.publishWindow()), now.Add(-NotesRecheck))
+	if err != nil {
+		return err
+	}
+	repos := map[string]*config.Repo{}
+	for _, r := range p.Cfg.Repos {
+		repos[r.Name()] = r
+	}
+	res := &notes.Resolver{GH: p.GH, MaxChars: p.Cfg.LLM.MaxInputChars}
+	for _, r := range rows {
+		if b.out() {
+			return nil
+		}
+		cfg := repos[r.Repo]
+		if cfg == nil {
+			continue
+		}
+		body, err := p.Store.Notes(ctx, r.BodyHash)
+		if err != nil {
+			return err
+		}
+		out, err := res.Resolve(ctx, notes.Request{Repo: r.Repo, Tag: r.Tag, Stream: r.Stream, Version: r.Version,
+			PrevTag: r.PrevTag, Body: body, Changelog: *cfg.Changelog})
+		if github.IsRateLimit(err) {
+			b.stop(err.Error())
+			return nil
+		}
+		if err != nil {
+			p.Log.Warn("resolving notes failed; retrying next tick", "repo", r.Repo, "tag", r.Tag, "err", err)
+			if err := p.Store.ResolveAttempted(ctx, r.Repo, r.Tag, p.now()); err != nil {
+				return err
+			}
+			continue
+		}
+		hash := ""
+		if out.Source != "" {
+			if hash, err = p.Store.PutNotes(ctx, out.Text); err != nil {
+				return err
+			}
+		}
+		if err := p.Store.ResolveNotes(ctx, r.Repo, r.Tag, out.Source, hash, p.now()); err != nil {
+			return err
+		}
+		if out.Source != r.NotesSource || hash != r.NotesHash {
+			p.Log.Info("notes resolved", "repo", r.Repo, "tag", r.Tag, "source", cmp.Or(out.Source, "none"), "chars", len([]rune(out.Text)))
 		}
 	}
 	return nil

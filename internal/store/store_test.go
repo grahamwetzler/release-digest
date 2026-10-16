@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,6 +123,35 @@ func TestPutRenderedAllIsAtomic(t *testing.T) {
 	for _, path := range []string{"feed.xml", "feed.atom"} {
 		if r, _ := s.Rendered(ctx, path); string(r.Bytes) != "old" {
 			t.Errorf("%s = %q after a failed batch, want old", path, r.Bytes)
+		}
+	}
+}
+
+func TestMigration3KeepsReleaseBodies(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rd.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range append(migrations[:2:2], `CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (2)`,
+		`INSERT INTO releases (repo, tag, guid, kind, html_url, first_seen_at, state, notes_source, notes_hash, next_attempt_at, origin)
+			VALUES ('o/r', 'v1', 'g1', 'release', 'u', 0, 'fallback', 'release_body', 'h1', 0, 'live'),
+			       ('o/r', 'v2', 'g2', 'tag', 'u', 0, 'pending', '', '', 0, 'live')`) {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for tag, body := range map[string]string{"v1": "h1", "v2": ""} {
+		r, err := s.Release(ctx, "o/r", tag)
+		if err != nil || r.BodyHash != body || r.NotesResolved {
+			t.Errorf("%s = %+v, %v; want body %q, unresolved", tag, r, err, body)
 		}
 	}
 }

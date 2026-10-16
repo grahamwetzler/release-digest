@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -52,8 +53,9 @@ func Channel(c *config.Config, f Format, generator string) feed.Channel {
 const ExcerptChars = 600
 
 // Item turns a stored release into a feed item. notes is the release's
-// resolved notes text, if any. Until summaries exist (milestone 4) every
-// visible item is a fallback: an excerpt of the notes and a link to them.
+// notes text, if any. Until summaries exist (milestone 4) a visible item is
+// a fallback, an excerpt of the notes, or a no_notes item saying there are
+// none (§3.2, §3.3, §6).
 func Item(r *store.Release, notes string) feed.Item {
 	version := r.Tag
 	if r.Name != "" && r.Name != r.Tag {
@@ -72,14 +74,26 @@ func Item(r *store.Release, notes string) feed.Item {
 	excerpt := feed.Excerpt(PlainText(notes), ExcerptChars)
 	desc := fmt.Sprintf("%s for %s %s.", link, r.Repo, r.Tag)
 	var body strings.Builder
-	if excerpt != "" {
+	switch {
+	case r.State == store.StateNoNotes:
+		desc = fmt.Sprintf("%s %s released — no release notes published.", r.Repo, version)
+		fmt.Fprintf(&body, "<p>%s</p>\n", html.EscapeString(desc))
+	case excerpt != "":
 		desc = excerpt
 		fmt.Fprintf(&body, "<p>%s</p>\n", html.EscapeString(excerpt))
 		link = "Full release notes"
 	}
-	fmt.Fprintf(&body, `<p><a href="%s">%s</a></p>`, html.EscapeString(r.HTMLURL), link)
+	fmt.Fprintf(&body, `<p><a href="%s">%s</a>`, html.EscapeString(r.HTMLURL), link)
+	if diff := DiffURL(r); diff != "" {
+		fmt.Fprintf(&body, ` · <a href="%s">Diff since %s</a>`, html.EscapeString(diff), html.EscapeString(r.PrevTag))
+	}
+	body.WriteString("</p>")
 	if r.State == store.StateFallback {
-		body.WriteString("\n<p><small>Summary pending.</small></p>")
+		body.WriteString("\n<p><small>Summary pending.")
+		if from := sourceNames[r.NotesSource]; from != "" && excerpt != "" {
+			body.WriteString(" Excerpt from " + from + ".")
+		}
+		body.WriteString("</small></p>")
 	}
 	return feed.Item{
 		Title:       title,
@@ -93,6 +107,33 @@ func Item(r *store.Release, notes string) feed.Item {
 	}
 }
 
+// sourceNames name each notes source for readers (§6).
+var sourceNames = map[string]string{
+	"release_body": "the release notes",
+	"changelog":    "the changelog",
+	"compare":      "the commit log",
+}
+
+// DiffURL is the GitHub compare page from the release's predecessor, or ""
+// if it has none. It is built from the release's page URL, which is always
+// <repo URL>/releases/tag/<tag>.
+func DiffURL(r *store.Release) string {
+	repoURL, _, ok := strings.Cut(r.HTMLURL, "/releases/tag/")
+	if r.PrevTag == "" || !ok {
+		return ""
+	}
+	return repoURL + "/compare/" + refPath(r.PrevTag) + "..." + refPath(r.Tag)
+}
+
+// refPath escapes each segment of a tag, keeping its slashes.
+func refPath(tag string) string {
+	parts := strings.Split(tag, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
+}
+
 // Markdown syntax PlainText removes.
 var (
 	mdFence    = regexp.MustCompile("(?m)^\\s*(```|~~~).*$")
@@ -100,13 +141,15 @@ var (
 	mdLink     = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
 	mdRefLink  = regexp.MustCompile(`\[([^\]]+)\]\[[^\]]*\]`)
 	mdTag      = regexp.MustCompile(`</?[A-Za-z!][^>]{0,500}>`)
-	mdLineHead = regexp.MustCompile(`(?m)^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)`)
+	mdLineHead = regexp.MustCompile(`(?m)^\s{0,3}(#{1,6}\s+|>\s?)`)
+	mdListItem = regexp.MustCompile(`(?m)^\s*([-*+]|\d+[.)])\s+`)
 	mdRule     = regexp.MustCompile(`(?m)^\s{0,3}([-*_=]\s*){3,}$`)
 	mdEmphasis = regexp.MustCompile("(\\*\\*|\\*|`)")
 )
 
 // PlainText reduces Markdown release notes to one line of plain text for
-// an excerpt: markup, HTML tags and line structure are dropped.
+// an excerpt: markup, HTML tags and line structure are dropped, and list
+// items are marked with bullets so they stay apart.
 func PlainText(md string) string {
 	s := mdFence.ReplaceAllString(md, "")
 	s = mdImage.ReplaceAllString(s, "$1")
@@ -115,6 +158,7 @@ func PlainText(md string) string {
 	s = mdTag.ReplaceAllString(s, " ")
 	s = mdRule.ReplaceAllString(s, "")
 	s = mdLineHead.ReplaceAllString(s, "")
+	s = mdListItem.ReplaceAllString(s, "• ")
 	s = mdEmphasis.ReplaceAllString(s, "")
 	s = html.UnescapeString(s)
 	return strings.Join(strings.Fields(s), " ")

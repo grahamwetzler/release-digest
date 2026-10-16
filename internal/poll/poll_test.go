@@ -111,9 +111,21 @@ func releases(from, n int, newest time.Time) []githubtest.Release {
 	out := make([]githubtest.Release, n)
 	for i := range out {
 		v := from + n - 1 - i
-		out[i] = githubtest.Release{Tag: fmt.Sprintf("v1.0.%d", v), Body: fmt.Sprintf("Notes for %d", v), Published: newest.Add(-time.Duration(i) * time.Hour)}
+		out[i] = githubtest.Release{Tag: fmt.Sprintf("v1.0.%d", v), Body: fmt.Sprintf("Notes for %d, long enough to stand on their own.", v), Published: newest.Add(-time.Duration(i) * time.Hour)}
 	}
 	return out
+}
+
+// body is release notes substantive enough to resolve without requests (§3.2).
+const body = "Substantive release notes, long enough to stand alone."
+
+// changelog gives r a default-branch CHANGELOG.md with a section for each of its tags.
+func changelog(r *githubtest.Repo) {
+	var b strings.Builder
+	for _, t := range r.Tags {
+		fmt.Fprintf(&b, "## %s\n\n- Changes in %s\n\n", t.Name, t.Name)
+	}
+	r.Files = map[string]map[string]string{"": {"CHANGELOG.md": b.String()}}
 }
 
 func prepend(r *githubtest.Repo, rels []githubtest.Release) {
@@ -245,9 +257,9 @@ repos:
 		{Tag: "v1.1.0", Prerelease: true, Published: t0.Add(-2 * time.Hour)},
 		{Tag: "nightly-1.0", Published: t0.Add(-3 * time.Hour)},
 		{Tag: "latest", Published: t0.Add(-4 * time.Hour)},
-		{Tag: "v1.0.0", Published: t0.Add(-5 * time.Hour)},
+		{Tag: "v1.0.0", Body: body, Published: t0.Add(-5 * time.Hour)},
 	}
-	h.gh.Repo("o/pre").Releases = []githubtest.Release{{Tag: "v2.0.0-rc.1", Published: t0.Add(-time.Hour)}}
+	h.gh.Repo("o/pre").Releases = []githubtest.Release{{Tag: "v2.0.0-rc.1", Body: body, Published: t0.Add(-time.Hour)}}
 	h.tick()
 	if r := h.row("o/r", "v3.0.0"); r != nil {
 		t.Errorf("a draft was recorded: %+v", r)
@@ -272,6 +284,7 @@ func TestTagsWaitForTheirDate(t *testing.T) {
 		{Name: "v1.1.0", SHA: "bbb", Date: t0.Add(-time.Hour)},
 		{Name: "v1.0.0", SHA: "aaa", Date: t0.Add(-48 * time.Hour)},
 	}
+	changelog(h.gh.Repo("o/tags"))
 	h.gh.Before = func(r *http.Request) {
 		if strings.Contains(r.URL.Path, "/commits/") {
 			h.gh.Repos["o/tags"].Status = http.StatusBadGateway // the metadata queue fails this tick
@@ -318,6 +331,7 @@ repos:
 		for i := range r.Tags {
 			r.Tags[i].Date = t0.Add(-time.Duration(i+1) * time.Hour)
 		}
+		changelog(r)
 	}
 	h.tick()
 	for repo, want := range map[string]map[string]string{
@@ -342,6 +356,7 @@ repos:
 		t.Fatalf("not promoted: %+v", r)
 	}
 	h.gh.Repo("o/semver").Tags = []githubtest.Tag{{Name: "v1.11.0", SHA: "w", Date: h.now}, {Name: "v1.9.0", SHA: "x"}, {Name: "v1.8.0", SHA: "z"}}
+	changelog(h.gh.Repo("o/semver"))
 	h.now = h.now.Add(time.Hour)
 	h.tick()
 	if r := h.row("o/semver", "v1.11.0"); r == nil || r.Origin != store.OriginLive || r.State != store.StatePending || r.PrevTag != "v1.10.0" {
@@ -614,7 +629,7 @@ func TestReconciliation(t *testing.T) {
 	h.tick()
 
 	// A release published after initialization that the scans missed (it sits below page 1).
-	missed := githubtest.Release{Tag: "v1.0.500", Published: t0.Add(time.Minute)}
+	missed := githubtest.Release{Tag: "v1.0.500", Body: body, Published: t0.Add(time.Minute)}
 	repo.Releases = append(repo.Releases[:35], append([]githubtest.Release{missed}, repo.Releases[35:]...)...)
 
 	// The day's reconciliation is interrupted by the budget after page 1.
@@ -653,7 +668,7 @@ func TestReconciledReleaseWithinALongAlertWindow(t *testing.T) {
 	repo := h.gh.Repo("o/r")
 	repo.Releases = releases(0, 30, t0.Add(-time.Hour))
 	h.tick()
-	missed := githubtest.Release{Tag: "v1.0.500", Published: t0.Add(time.Hour)}
+	missed := githubtest.Release{Tag: "v1.0.500", Body: body, Published: t0.Add(time.Hour)}
 	repo.Releases = append(repo.Releases, missed) // below page 1 from the start
 	h.now = t0.Add(10 * 24 * time.Hour)
 	h.tick()
@@ -764,7 +779,7 @@ func TestReleasePublishedDuringTheFirstScanIsLive(t *testing.T) {
 	h.gh.Before = func(r *http.Request) {
 		if r.URL.Path == "/repos/o/r/releases" && h.now.Equal(t0) {
 			// Published while page 1 is being served, after the scan started.
-			repo.Releases = append([]githubtest.Release{{Tag: "v2.0.0", Published: t0.Add(30 * time.Second)}}, repo.Releases...)
+			repo.Releases = append([]githubtest.Release{{Tag: "v2.0.0", Body: body, Published: t0.Add(30 * time.Second)}}, repo.Releases...)
 			h.now = t0.Add(time.Minute)
 		}
 	}
@@ -786,7 +801,7 @@ func TestSwitchToReleasesDoesNotSpendBackfillOnStoredTags(t *testing.T) {
 	repo.Releases = []githubtest.Release{
 		{Tag: "v1.2.0", Published: t0.Add(-time.Hour)},
 		{Tag: "v1.1.0", Published: t0.Add(-2 * time.Hour)},
-		{Tag: "v1.0.0", Published: t0.Add(-3 * time.Hour)},
+		{Tag: "v1.0.0", Body: body, Published: t0.Add(-3 * time.Hour)},
 	}
 	h.now = t0.Add(time.Hour)
 	h.tick()
@@ -832,9 +847,148 @@ func TestFirstScanStartComparedAtSecondPrecision(t *testing.T) {
 	h := newHarness(t, "defaults: {backfill: 0}\nrepos: [{repo: o/r}]")
 	h.now = t0.Add(500 * time.Millisecond)
 	// Published in the scan's starting second: GitHub reports it as t0 exactly.
-	h.gh.Repo("o/r").Releases = []githubtest.Release{{Tag: "v1.0.0", Published: t0}}
+	h.gh.Repo("o/r").Releases = []githubtest.Release{{Tag: "v1.0.0", Body: body, Published: t0}}
 	h.tick()
 	if r := h.row("o/r", "v1.0.0"); r == nil || r.Origin != store.OriginLive || r.State != store.StatePending {
 		t.Errorf("release in the start second = %+v, want live and pending", r)
+	}
+}
+
+func TestTagNotesFromTheChangelog(t *testing.T) {
+	h := newHarness(t, "repos: [{repo: o/r, sources: [tags]}]")
+	repo := h.gh.Repo("o/r")
+	repo.Tags = []githubtest.Tag{{Name: "v1.1.0", SHA: "b", Date: t0.Add(-time.Hour)}, {Name: "v1.0.0", SHA: "a", Date: t0.Add(-2 * time.Hour)}}
+	repo.Files = map[string]map[string]string{"v1.1.0": {"CHANGELOG.md": "# Changelog\n\n## 1.1.0\n\n- Added a flag\n\n## 1.0.0\n\n- First\n"}}
+	h.tick()
+	r := h.row("o/r", "v1.1.0")
+	text, _ := h.st.Notes(h.ctx, r.NotesHash)
+	if r.State != store.StatePending || r.NotesSource != "changelog" || !r.NotesResolved || text != "## 1.1.0\n\n- Added a flag" {
+		t.Errorf("row = %+v, notes %q", r, text)
+	}
+}
+
+func TestNoNotesPublishesAtOnce(t *testing.T) {
+	h := newHarness(t, "defaults: {backfill: 1}\nrepos: [{repo: o/r}]")
+	h.gh.Repo("o/r").Releases = []githubtest.Release{{Tag: "v1.0.0", Body: "See CHANGELOG.md", Published: t0.Add(-time.Hour)}}
+	h.tick()
+	r := h.row("o/r", "v1.0.0")
+	if r.State != store.StateNoNotes || r.NotesSource != "" || r.NotesHash != "" || !r.ContentUpdated.Equal(t0) {
+		t.Errorf("row = %+v, want no_notes at once, without waiting for publish_after", r)
+	}
+}
+
+func TestFallbackBecomesNoNotesOnceResolved(t *testing.T) {
+	h := newHarness(t, "llm: {publish_after: 1h}\ndefaults: {backfill: 1}\nrepos: [{repo: o/r}]")
+	repo := h.gh.Repo("o/r")
+	repo.Releases = []githubtest.Release{{Tag: "v1.0.0", Body: "See the changelog.", Published: t0.Add(-time.Hour)}}
+	h.gh.Before = func(r *http.Request) { // changelog lookups fail; everything else works
+		repo.Status = 0
+		if strings.Contains(r.URL.Path, "/contents") {
+			repo.Status = http.StatusBadGateway
+		}
+	}
+	h.tick()
+	r := h.row("o/r", "v1.0.0")
+	if r.State != store.StatePending || r.NotesResolved || r.ResolveAttempt.IsZero() || !strings.Contains(h.log.String(), "retrying next tick") {
+		t.Fatalf("after a failed resolution: %+v", r)
+	}
+	h.now = t0.Add(2 * time.Hour)
+	h.tick() // still failing: promoted by age with its provisional notes
+	r = h.row("o/r", "v1.0.0")
+	text, _ := h.st.Notes(h.ctx, r.NotesHash)
+	if r.State != store.StateFallback || text != "See the changelog." {
+		t.Fatalf("after publish_after: %+v, notes %q", r, text)
+	}
+	h.gh.Before, repo.Status = nil, 0
+	h.now = t0.Add(3 * time.Hour)
+	h.tick()
+	r = h.row("o/r", "v1.0.0")
+	if r.State != store.StateNoNotes || r.NotesHash != "" || !r.ContentUpdated.Equal(h.now) {
+		t.Errorf("after resolution: %+v, want no_notes updated now", r)
+	}
+}
+
+func TestNoNotesRecheckedWhenNotesAppear(t *testing.T) {
+	h := newHarness(t, "defaults: {backfill: 1}\nrepos: [{repo: o/r}]")
+	repo := h.gh.Repo("o/r")
+	repo.Releases = []githubtest.Release{{Tag: "v1.0.0", Published: t0.Add(-time.Hour)}}
+	h.tick()
+	if r := h.row("o/r", "v1.0.0"); r.State != store.StateNoNotes {
+		t.Fatalf("row = %+v", r)
+	}
+	repo.Files = map[string]map[string]string{"": {"CHANGELOG.md": "## v1.0.0\n\n- Written after the release\n"}}
+	h.now = t0.Add(time.Hour)
+	h.gh.ResetLog()
+	h.tick()
+	if n := h.gh.Count("/repos/o/r/contents"); n != 0 || h.row("o/r", "v1.0.0").State != store.StateNoNotes {
+		t.Errorf("rechecked within a day (%d requests)", n)
+	}
+	h.now = t0.Add(25 * time.Hour)
+	h.tick()
+	r := h.row("o/r", "v1.0.0")
+	if r.State != store.StateFallback || r.NotesSource != "changelog" || !r.ContentUpdated.Equal(h.now) || !r.NextAttempt.Equal(h.now) {
+		t.Errorf("after the recheck: %+v, want fallback from the changelog", r)
+	}
+	// Outside the publish window, no_notes rows are left alone.
+	h.st.ResolveNotes(h.ctx, "o/r", "v1.0.0", "", "", h.now)
+	h.now = t0.Add(9 * 24 * time.Hour)
+	h.gh.ResetLog()
+	h.tick()
+	if n := h.gh.Count("/repos/o/r/contents"); n != 0 {
+		t.Errorf("an old no_notes release was rechecked (%d requests)", n)
+	}
+}
+
+func TestBodyEditsOnAVisibleRelease(t *testing.T) {
+	h := newHarness(t, "llm: {publish_after: 1h}\ndefaults: {backfill: 1}\nrepos: [{repo: o/r}]")
+	repo := h.gh.Repo("o/r")
+	repo.Releases = []githubtest.Release{{Tag: "v1.0.0", Body: body, Published: t0.Add(-time.Hour)}}
+	h.tick()
+	h.now = t0.Add(2 * time.Hour)
+	h.tick()
+	if r := h.row("o/r", "v1.0.0"); r.State != store.StateFallback {
+		t.Fatalf("row = %+v", r)
+	}
+	edited := body + " Edited to add a second sentence."
+	repo.Releases[0].Body = edited
+	h.now = t0.Add(3 * time.Hour)
+	h.tick()
+	r := h.row("o/r", "v1.0.0")
+	text, _ := h.st.Notes(h.ctx, r.NotesHash)
+	if r.State != store.StateFallback || text != edited || !r.ContentUpdated.Equal(h.now) {
+		t.Errorf("after an edit: %+v, notes %q", r, text)
+	}
+	repo.Releases[0].Body = ""
+	h.now = t0.Add(4 * time.Hour)
+	h.tick()
+	if r := h.row("o/r", "v1.0.0"); r.State != store.StateNoNotes || !r.ContentUpdated.Equal(h.now) {
+		t.Errorf("after emptying the body: %+v, want no_notes", r)
+	}
+}
+
+func TestResolutionIsGatedAndStopsOnRateLimits(t *testing.T) {
+	h := newHarness(t, "repos: [{repo: o/r, sources: [tags]}]")
+	repo := h.gh.Repo("o/r")
+	repo.Tags = []githubtest.Tag{{Name: "v1.0.0", SHA: "a", Date: t0.Add(-time.Hour)}}
+	h.gh.Before = func(r *http.Request) {
+		if strings.Contains(r.URL.Path, "/contents") {
+			h.gh.RateLimited, h.gh.Reset = true, h.now.Add(time.Hour)
+		}
+	}
+	h.tick()
+	r := h.row("o/r", "v1.0.0")
+	if r.NotesResolved || !r.ResolveAttempt.IsZero() || r.State != store.StatePending {
+		t.Errorf("after a rate limit: %+v, want unresolved and not counted as an attempt", r)
+	}
+	if n := h.gh.Count("/repos/o/r/contents"); n != 1 {
+		t.Errorf("%d contents requests, want 1 before stopping", n)
+	}
+	h.gh.Before, h.gh.RateLimited = nil, false
+	repo.Status = http.StatusBadGateway // the sweep fails: no confirmation, no resolution
+	h.now = t0.Add(2 * time.Hour)
+	h.gh.ResetLog()
+	h.tick()
+	if n := h.gh.Count("/repos/o/r/contents"); n != 0 {
+		t.Errorf("%d contents requests for an unconfirmed repo", n)
 	}
 }

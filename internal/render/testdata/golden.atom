@@ -17,8 +17,8 @@
     <published>2026-10-15T12:00:00Z</published>
     <updated>2026-10-15T13:00:00Z</updated>
     <category term="astral-sh/uv"></category>
-    <summary type="text">Highlights Faster lockfile resolution for workspaces &amp; more Fixed uv sync on Windows</summary>
-    <content type="html">&lt;p&gt;Highlights Faster lockfile resolution for workspaces &amp;amp; more Fixed uv sync on Windows&lt;/p&gt;&#xA;&lt;p&gt;&lt;a href=&#34;https://github.com/astral-sh/uv/releases/tag/0.9.4&#34;&gt;Full release notes&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summary pending.&lt;/small&gt;&lt;/p&gt;</content>
+    <summary type="text">Highlights • Faster lockfile resolution for workspaces &amp; more • Fixed uv sync on Windows</summary>
+    <content type="html">&lt;p&gt;Highlights • Faster lockfile resolution for workspaces &amp;amp; more • Fixed uv sync on Windows&lt;/p&gt;&#xA;&lt;p&gt;&lt;a href=&#34;https://github.com/astral-sh/uv/releases/tag/0.9.4&#34;&gt;Full release notes&lt;/a&gt; · &lt;a href=&#34;https://github.com/astral-sh/uv/compare/0.9.3...0.9.4&#34;&gt;Diff since 0.9.3&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summary pending. Excerpt from the release notes.&lt;/small&gt;&lt;/p&gt;</content>
   </entry>
   <entry>
     <id>urn:uuid:f5e760ae-d7bf-5704-b4e8-7ac51a0ca91d</id>
@@ -27,8 +27,8 @@
     <published>2026-10-14T12:00:00Z</published>
     <updated>2026-10-14T13:00:00Z</updated>
     <category term="aws/aws-sdk-go-v2"></category>
-    <summary type="text">Tag for aws/aws-sdk-go-v2 service/s3/v1.2.3.</summary>
-    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3&#34;&gt;Tag&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summary pending.&lt;/small&gt;&lt;/p&gt;</content>
+    <summary type="text">aws/aws-sdk-go-v2 service/s3/v1.2.3 released — no release notes published.</summary>
+    <content type="html">&lt;p&gt;aws/aws-sdk-go-v2 service/s3/v1.2.3 released — no release notes published.&lt;/p&gt;&#xA;&lt;p&gt;&lt;a href=&#34;https://github.com/aws/aws-sdk-go-v2/releases/tag/service/s3/v1.2.3&#34;&gt;Tag&lt;/a&gt; · &lt;a href=&#34;https://github.com/aws/aws-sdk-go-v2/compare/service/s3/v1.2.2...service/s3/v1.2.3&#34;&gt;Diff since service/s3/v1.2.2&lt;/a&gt;&lt;/p&gt;</content>
   </entry>
   <entry>
     <id>urn:uuid:6bd39253-6b16-5373-9303-a64614c4a9a7</id>

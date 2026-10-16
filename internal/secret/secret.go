@@ -20,6 +20,9 @@ const Redacted = "[redacted]"
 // returns the value, for setting a request header at request time.
 type String struct{ v string }
 
+// New wraps v, for values that come from somewhere other than Load, such as tests.
+func New(v string) String { return String{v} }
+
 func (s String) Reveal() string               { return s.v }
 func (s String) IsZero() bool                 { return s.v == "" }
 func (s String) String() string               { return Redacted }

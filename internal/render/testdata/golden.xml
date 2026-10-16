@@ -33,13 +33,19 @@
       <guid isPermaLink="false">f5e760ae-d7bf-5704-b4e8-7ac51a0ca91d</guid>
     </item>
     <item>
-      <title>o/semver Build &lt;5&gt; &amp; more (pre-release)</title>
+      <title>⚠ o/semver Build &lt;5&gt; &amp; more (pre-release) — Parser rewrite &lt;fast&gt; &amp; safe</title>
       <link>https://github.com/o/semver/releases/tag/1.0.0+build.5</link>
-      <description>Release notes for o/semver 1.0.0+build.5.</description>
-      <content:encoded><![CDATA[<p><a href="https://github.com/o/semver/releases/tag/1.0.0+build.5">Release notes</a></p>
-<p><small>Summary pending.</small></p>]]></content:encoded>
+      <description>Parser rewrite &amp;lt;fast&amp;gt; &amp;amp; safe Breaking changes: • Drops Go 1.25 Features: • Streams `a&amp;lt;b&amp;gt;` Security: • Fixes GHSA-xxxx-yyyy-zzzz</description>
+      <content:encoded><![CDATA[<p><strong>Parser rewrite &lt;fast&gt; &amp; safe</strong></p>
+<h4>Breaking changes</h4><ul><li>Drops Go 1.25</li></ul>
+<h4>Features</h4><ul><li>Streams `a&lt;b&gt;`</li></ul>
+<h4>Security</h4><ul><li>Fixes GHSA-xxxx-yyyy-zzzz</li></ul>
+<p><a href="https://github.com/o/semver/releases/tag/1.0.0+build.5">Full release notes</a> · <a href="https://github.com/o/semver/compare/0.9.0...1.0.0+build.5">Diff since 0.9.0</a></p>
+<p><small>Summarized by qwen3:14b from the release notes.</small></p>]]></content:encoded>
       <category>o/semver</category>
       <category>prerelease</category>
+      <category>breaking</category>
+      <category>security</category>
       <pubDate>Tue, 13 Oct 2026 12:00:00 +0000</pubDate>
       <guid isPermaLink="false">6bd39253-6b16-5373-9303-a64614c4a9a7</guid>
     </item>

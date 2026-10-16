@@ -200,7 +200,8 @@ The resolved text is stored once in `notes`, keyed by its SHA-256, and the relea
 ### 3.3 Summarize (LLM)
 
 - **Protocol:** OpenAI Chat Completions. Config sets `base_url`, `model` and `api_key` (from env), plus `temperature` (default 0.2) and `timeout`.
-- **Structured output:** the request asks for JSON matching a fixed schema, using `response_format: {type: "json_schema"}`. If the server rejects that (some Ollama and older endpoints do), the client retries once with `{type: "json_object"}` and then with plain prompt instructions. The reply is validated against the schema; one repair retry is allowed.
+- **Structured output:** the request asks for JSON matching a fixed schema, using `response_format: {type: "json_schema"}`. If the server rejects that (some Ollama and older endpoints do), the client retries once with `{type: "json_object"}` and then with plain prompt instructions. A rejection is a 400 or 422 whose message mentions the response format; any other 400 is an ordinary failure. The client remembers the format that worked, so later calls start there. In prompt-only mode the schema is appended to the messages as an extra user message. That message isn't part of the cache key, because the key covers the request the summary was made for, not the transport fallback.
+- **Validation:** the reply is validated against the schema. A code fence around the JSON is tolerated. An empty headline or one over 100 characters is invalid. List entries are trimmed, empty ones are dropped, and each list is cut to 6. One repair retry is allowed: the invalid reply goes back to the model with the reason it failed. The summary is stored under the key of the original request.
 - **Schema:**
   ```json
   {
@@ -209,13 +210,12 @@ The resolved text is stored once in `notes`, keyed by its SHA-256, and the relea
     "features": ["string"],
     "fixes":    ["string"],
     "security": ["string"],
-    "security_urgency": "none | advisory | urgent",
-    "security_reason": "string",
     "noise_only": false
   }
   ```
-  Each list is capped at 6 entries. The prompt says to omit dependency bumps, CI or docs-only changes, and contributor thank-yous. `noise_only: true` means "nothing user-facing", which renders as a one-line item instead of being hidden, so the feed still shows the version shipped.
-- **Prompt:** a built-in default ships in the binary, and `llm.prompt_file` can override it. The prompt gets the repo, the version, the previous version (when known) and the notes source.
+  The urgency fields of §3.4 (`security_urgency`, `security_reason`) join the schema in milestone 5 as schema version 2. Each list is capped at 6 entries. The prompt says to omit dependency bumps, CI or docs-only changes, and contributor thank-yous. `noise_only: true` means "nothing user-facing", which renders as a one-line item instead of being hidden, so the feed still shows the version shipped.
+- **Prompt:** a built-in default system prompt ships in the binary, and `llm.prompt_file` replaces it. The file is re-read at the start of every summarize stage, so an edit applies on the next tick. The user message gets the repo, the tag, the previous tag (or "unknown"), the notes source and the notes, inside a `<notes>` block. The system prompt tells the model the notes are data, not instructions.
+- **No model, no summaries:** an empty `llm.model` turns the summarize stage off. The feed then shows excerpts only, through the same `fallback` path as milestone 2, and startup logs a warning.
 - **Caching:** the summary key is the SHA-256 of a canonical JSON document holding everything that shapes the output:
   - `base_url` and `model`
   - `temperature`
@@ -223,7 +223,9 @@ The resolved text is stored once in `notes`, keyed by its SHA-256, and the relea
   - the **fully rendered request messages**, which embed the effective prompt text (built-in or the *contents* of `prompt_file`), the repo, the version, `prev_tag`, the notes source and the notes themselves
 
   Two releases share a summary only if the LLM would have seen byte-identical requests. Editing `prompt_file` or switching model changes the key for *future* summaries. The scheduler only summarizes releases that are eligible (see the state table below), so published `summarized` items aren't re-billed. `release-digest resummarize` forces it.
-- **Concurrency and retries:** `llm.concurrency` (default 2). Within one attempt, the client retries 429 and 5xx up to 3 times with jittered exponential backoff. A failed attempt increments `attempts` and records `last_error`. It also sets `next_attempt_at = now + min(15m × 2^attempts, 24h)`, so a broken LLM isn't hammered every tick. Backoff state is persisted and survives restarts.
+- **Concurrency and retries:** `llm.concurrency` (default 2). Within one attempt, the client retries 429 and 5xx up to 3 times with jittered exponential backoff. A failed attempt increments `attempts` and records `last_error`. It also sets `next_attempt_at = now + min(15m × 2^attempts, 24h)`, counting the attempts before this one, so the first failure waits 15m. A broken LLM therefore isn't hammered every tick. Backoff state is persisted and survives restarts. A success resets `attempts` and `last_error`. A call cut short by shutdown is not counted as a failure.
+- **Eligibility and the gate:** the stage takes `pending` and `fallback` rows whose notes are resolved and non-empty (§3.2). Rows whose notes are still provisional wait for resolution, so a body that only points at a changelog is never summarized. Rows must be dated, not marked deleted, due by `next_attempt_at`, and in repos confirmed this tick. Before each LLM call, and before publishing a summary that's already stored, the repo passes the just-in-time public check (§3.1). A failed check invalidates the tick's confirmation, so the repo's remaining rows are skipped without further checks. A gate failure is not an attempt.
+- **Publication:** a summarized `pending` row is published at once as `summarized`, without waiting for `publish_after`. The update is conditional on the notes hash it summarized, so notes that changed during the call are summarized again later rather than overwritten.
 
 **Release states.** Eligibility for the summarize pass comes from this table, and nowhere else:
 
@@ -499,7 +501,7 @@ Rules:
 
 ## 6. Feed item format
 
-**Title:** `{repo} {version} — {headline}`, for example `astral-sh/uv 0.9.4 — Faster lockfile resolution for workspaces`. A `⚠` prefix marks releases with breaking changes, and a `(pre-release)` suffix marks pre-releases.
+**Title:** `{repo} {version} — {headline}`, for example `astral-sh/uv 0.9.4 — Faster lockfile resolution for workspaces`. A `⚠` prefix marks releases with breaking changes, and `(pre-release)` follows the version of a pre-release. A noise-only release shows its headline and "No user-facing changes." instead of the lists.
 
 **Link:** the GitHub release page, or `…/releases/tag/{tag}` for tags, or `…/compare/{prev}...{tag}`.
 
@@ -526,12 +528,14 @@ Empty sections are omitted. The footer names the model and notes source (`releas
 ```
 release-digest run                       # scheduler + HTTP (container default)
 release-digest build                     # one poll+summarize+render pass, then exit
-release-digest summarize owner/repo@tag  # dry run: resolve notes, call LLM, print result; writes nothing
+release-digest summarize [--messages] owner/repo@tag  # dry run: resolve notes, call LLM, print result; writes nothing
 release-digest resummarize [--repo r] [--since 30d]
 release-digest config lint
 release-digest validate [--w3c]
 release-digest healthcheck
 ```
+
+`summarize` runs the token guard and the public check, then resolves the notes exactly as the poll stage does (§3.2). It works out the predecessor from GitHub's complete tag list, not the stored history, and doesn't open the store or the HTTP cache. It prints the notes source, the cache key, the token counts, the summary JSON and the rendered item. `--messages` also prints the request messages.
 
 ### 7.1 Compose
 
@@ -606,8 +610,8 @@ internal/config/         YAML + env merge, defaults, validation
 internal/github/         REST client: releases, tags, commits, compare, contents; ETag cache; rate-limit pacing
 internal/notes/          resolve notes: body heuristics, changelog section extraction, compare fallback, truncation
 internal/secret/         secret.String (redacting), *_FILE / /run/secrets / env resolution, SIGHUP reload
-internal/llm/            OpenAI-compatible client, response_format fallbacks, schema validation, retries
-internal/summarize/      prompt, cache key, pending-queue worker, publish_after fallback
+internal/llm/            OpenAI-compatible client, response_format fallbacks, retries (llmtest: a fake server)
+internal/summarize/      prompt, schema validation and repair, cache key, the summarize stage
 internal/advisory/       GHSA/CVE extraction from notes, GitHub advisory lookup + cache
 internal/notify/         urgency decision, ntfy client, outbox delivery + retries
 internal/feed/           RSS/Atom render + checks (ported from feed-me)

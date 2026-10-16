@@ -178,9 +178,9 @@ func (p *Poller) recordVisibility(ctx context.Context, repo string, tick int64, 
 	return p.Store.Visibility(ctx, repo, tick, vis.Public, vis.Gone, p.now(), msg)
 }
 
-// checkNow is the just-in-time public check before an exposing action
-// (§3.1). Any outcome but public invalidates the tick's confirmation.
-func (p *Poller) checkNow(ctx context.Context, repo string, tick int64, during string) (bool, error) {
+// CheckNow is the just-in-time public check before an exposing action
+// (§3.1), such as a promotion or an LLM call. Any outcome but public invalidates the tick's confirmation.
+func (p *Poller) CheckNow(ctx context.Context, repo string, tick int64, during string) (bool, error) {
 	vis, err := p.GH.CheckPublic(ctx, repo, 0)
 	if serr := p.recordVisibility(ctx, repo, tick, vis, err, during); serr != nil {
 		return false, serr
@@ -344,12 +344,15 @@ func webBase(api string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-func (p *Poller) tagURL(repo, tag string) string {
+func (p *Poller) tagURL(repo, tag string) string { return TagURL(p.Cfg.GitHub.APIURL, repo, tag) }
+
+// TagURL is the web page of a tag, the item link of a tag without a release.
+func TagURL(api, repo, tag string) string {
 	parts := strings.Split(tag, "/")
 	for i, s := range parts {
 		parts[i] = url.PathEscape(s)
 	}
-	return webBase(p.Cfg.GitHub.APIURL) + "/" + repo + "/releases/tag/" + strings.Join(parts, "/")
+	return webBase(api) + "/" + repo + "/releases/tag/" + strings.Join(parts, "/")
 }
 
 // pollRepo is one repo's unit of poll work: the scan, the window deletion
@@ -1076,7 +1079,7 @@ func (p *Poller) Promote(ctx context.Context, tick int64) (int, error) {
 		if !ok {
 			continue
 		}
-		public, err := p.checkNow(ctx, repo, tick, "promotion")
+		public, err := p.CheckNow(ctx, repo, tick, "promotion")
 		if err != nil {
 			return promoted, err
 		}

@@ -32,14 +32,16 @@
   </entry>
   <entry>
     <id>urn:uuid:6bd39253-6b16-5373-9303-a64614c4a9a7</id>
-    <title type="text">o/semver Build &lt;5&gt; &amp; more (pre-release)</title>
+    <title type="text">⚠ o/semver Build &lt;5&gt; &amp; more (pre-release) — Parser rewrite &lt;fast&gt; &amp; safe</title>
     <link rel="alternate" type="text/html" href="https://github.com/o/semver/releases/tag/1.0.0+build.5"></link>
     <published>2026-10-13T12:00:00Z</published>
     <updated>2026-10-13T13:00:00Z</updated>
     <category term="o/semver"></category>
     <category term="prerelease"></category>
-    <summary type="text">Release notes for o/semver 1.0.0+build.5.</summary>
-    <content type="html">&lt;p&gt;&lt;a href=&#34;https://github.com/o/semver/releases/tag/1.0.0+build.5&#34;&gt;Release notes&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summary pending.&lt;/small&gt;&lt;/p&gt;</content>
+    <category term="breaking"></category>
+    <category term="security"></category>
+    <summary type="text">Parser rewrite &lt;fast&gt; &amp; safe Breaking changes: • Drops Go 1.25 Features: • Streams `a&lt;b&gt;` Security: • Fixes GHSA-xxxx-yyyy-zzzz</summary>
+    <content type="html">&lt;p&gt;&lt;strong&gt;Parser rewrite &amp;lt;fast&amp;gt; &amp;amp; safe&lt;/strong&gt;&lt;/p&gt;&#xA;&lt;h4&gt;Breaking changes&lt;/h4&gt;&lt;ul&gt;&lt;li&gt;Drops Go 1.25&lt;/li&gt;&lt;/ul&gt;&#xA;&lt;h4&gt;Features&lt;/h4&gt;&lt;ul&gt;&lt;li&gt;Streams `a&amp;lt;b&amp;gt;`&lt;/li&gt;&lt;/ul&gt;&#xA;&lt;h4&gt;Security&lt;/h4&gt;&lt;ul&gt;&lt;li&gt;Fixes GHSA-xxxx-yyyy-zzzz&lt;/li&gt;&lt;/ul&gt;&#xA;&lt;p&gt;&lt;a href=&#34;https://github.com/o/semver/releases/tag/1.0.0+build.5&#34;&gt;Full release notes&lt;/a&gt; · &lt;a href=&#34;https://github.com/o/semver/compare/0.9.0...1.0.0+build.5&#34;&gt;Diff since 0.9.0&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;&lt;small&gt;Summarized by qwen3:14b from the release notes.&lt;/small&gt;&lt;/p&gt;</content>
   </entry>
   <entry>
     <id>urn:uuid:57d81944-317d-5742-a8f7-78f64aabf842</id>

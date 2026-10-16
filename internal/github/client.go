@@ -366,6 +366,16 @@ func (c *Client) Releases(ctx context.Context, repo string, page int) ([]Release
 	return out, err
 }
 
+// ReleaseByTag returns the published release for tag. A tag without a
+// release, or a draft, is ErrNotFound.
+func (c *Client) ReleaseByTag(ctx context.Context, repo, tag string) (*Release, error) {
+	var r Release
+	if _, err := c.getJSON(ctx, repoPath(repo)+"/releases/tags/"+refPath(tag), 0, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 // TagRef is one tag ref: the tag and the object it points at, a commit for
 // a lightweight tag or a tag object for an annotated one.
 type TagRef struct {

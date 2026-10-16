@@ -11,13 +11,19 @@ import (
 	"net/http"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"release-digest/internal/config"
 	"release-digest/internal/github"
+	"release-digest/internal/llm"
 	"release-digest/internal/poll"
 	"release-digest/internal/secret"
 	"release-digest/internal/store"
+	"release-digest/internal/summarize"
 )
+
+// llmSleep, when set, replaces the LLM client's retry backoff (for tests).
+var llmSleep func(ctx context.Context, d time.Duration) bool
 
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
@@ -27,6 +33,8 @@ const usage = `Release Digest condenses GitHub release notes into one RSS feed.
 Usage:
   release-digest run                 long-running: scheduler + HTTP server
   release-digest build               one pass, then exit
+  release-digest summarize owner/repo@tag
+                                     dry run: resolve notes, call the LLM, print the result; writes nothing
   release-digest validate [--w3c]    check the stored feed (optionally with the W3C validator)
   release-digest config lint         validate the config and secrets; exits non-zero on error
   release-digest healthcheck         probe /healthz (for Docker HEALTHCHECK)
@@ -54,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdConfigLint(args[1:], stdout, stderr)
 	case "build":
 		return cmdBuild(args, stdout, stderr)
+	case "summarize":
+		return cmdSummarize(args, stdout, stderr)
 	case "validate":
 		return cmdValidate(args, stdout, stderr)
 	case "run":
@@ -128,6 +138,7 @@ type env struct {
 	log     *slog.Logger
 	gh      *github.Client
 	poller  *poll.Poller
+	summ    *summarize.Summarizer
 
 	// guardOK is set once the active GitHub token has passed the token guard
 	// (§3.1). Until then no tick polls GitHub.
@@ -164,6 +175,20 @@ func open(ctx context.Context, cfgPath string, stderr io.Writer) (*env, int) {
 		UserAgent: generator(),
 	}
 	e.poller = &poll.Poller{GH: e.gh, Store: e.store, Cfg: cfg, Log: log}
+	e.summ = &summarize.Summarizer{Store: e.store, Cfg: cfg, Log: log, LLM: &llm.Client{
+		BaseURL:     cfg.LLM.BaseURL,
+		Model:       cfg.LLM.Model,
+		Key:         func() secret.String { return e.secrets.LLM.Get().Value },
+		Headers:     cfg.LLM.Headers,
+		Temperature: *cfg.LLM.Temperature,
+		Timeout:     cfg.LLM.Timeout.D,
+		HTTP:        &http.Client{},
+		UserAgent:   generator(),
+		Sleep:       llmSleep,
+	}}
+	if !e.summ.Enabled() {
+		log.Warn("no llm.model configured: releases are published as excerpts, without summaries")
+	}
 	return e, 0
 }
 

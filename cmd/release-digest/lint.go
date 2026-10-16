@@ -43,6 +43,9 @@ func cmdConfigLint(args []string, stdout, stderr io.Writer) int {
 	if !loaded[1].Present() {
 		fmt.Fprintln(stdout, "warning: no GitHub token; requests are limited to 60 per hour")
 	}
+	if c.LLM.Model == "" {
+		fmt.Fprintln(stdout, "warning: llm.model is not set; releases are published as excerpts, without summaries")
+	}
 	if !loaded[0].Present() && !localURL(c.LLM.BaseURL) {
 		fmt.Fprintf(stdout, "warning: llm.base_url %s is not a local address and there is no llm api key\n", c.LLM.BaseURL)
 	}

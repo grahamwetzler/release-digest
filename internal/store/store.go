@@ -273,26 +273,32 @@ type Release struct {
 	BodyHash       string // → notes.hash: the release body; "" for none
 	NotesResolved  bool   // notes_source is final: "" then means no notes (§3.2)
 	ResolveAttempt time.Time
+	SummaryKey     string // → summaries.key; "" until summarized
+	Attempts       int    // failed summarize attempts (§3.3)
+	LastError      string
 }
 
 const releaseColumns = `repo, tag, guid, kind, name, html_url, stream, version, prev_tag, prerelease,
 	published_at, first_seen_at, state, notes_source, origin, urgency, content_updated_at, missing_since, next_attempt_at,
-	ref_sha, ref_type, notes_hash, last_verified_at, verify_attempted_at, body_hash, notes_resolved, resolve_attempted_at`
+	ref_sha, ref_type, notes_hash, last_verified_at, verify_attempted_at, body_hash, notes_resolved, resolve_attempted_at,
+	summary_key, attempts, last_error`
 
 func scanRelease(row interface{ Scan(...any) error }) (*Release, error) {
 	var r Release
 	var published, contentUpdated, missing, verified, attempted, resolveAttempt sql.NullInt64
 	var firstSeen, nextAttempt int64
+	var summaryKey sql.NullString
 	err := row.Scan(&r.Repo, &r.Tag, &r.GUID, &r.Kind, &r.Name, &r.HTMLURL, &r.Stream, &r.Version, &r.PrevTag,
 		&r.Prerelease, &published, &firstSeen, &r.State, &r.NotesSource, &r.Origin, &r.Urgency, &contentUpdated,
 		&missing, &nextAttempt, &r.RefSHA, &r.RefType, &r.NotesHash, &verified, &attempted,
-		&r.BodyHash, &r.NotesResolved, &resolveAttempt)
+		&r.BodyHash, &r.NotesResolved, &resolveAttempt, &summaryKey, &r.Attempts, &r.LastError)
 	if err != nil {
 		return nil, err
 	}
 	r.Published, r.ContentUpdated, r.MissingSince = fromNull(published), fromNull(contentUpdated), fromNull(missing)
 	r.LastVerified, r.VerifyAttempt, r.ResolveAttempt = fromNull(verified), fromNull(attempted), fromNull(resolveAttempt)
 	r.FirstSeen, r.NextAttempt = fromMS(firstSeen), fromMS(nextAttempt)
+	r.SummaryKey = summaryKey.String
 	return &r, nil
 }
 
@@ -307,13 +313,13 @@ func (s ops) InsertRelease(ctx context.Context, r *Release) (bool, error) {
 		r.Urgency = "none"
 	}
 	res, err := s.q.ExecContext(ctx, `INSERT INTO releases (`+releaseColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (repo, tag) DO NOTHING`,
 		r.Repo, r.Tag, r.GUID, r.Kind, r.Name, r.HTMLURL, r.Stream, r.Version, r.PrevTag, r.Prerelease,
 		toNull(r.Published), toMS(r.FirstSeen), r.State, r.NotesSource, r.Origin, r.Urgency,
 		toNull(r.ContentUpdated), toNull(r.MissingSince), toMS(r.NextAttempt),
 		r.RefSHA, r.RefType, r.NotesHash, toNull(r.LastVerified), toNull(r.VerifyAttempt),
-		r.BodyHash, r.NotesResolved, toNull(r.ResolveAttempt))
+		r.BodyHash, r.NotesResolved, toNull(r.ResolveAttempt), nullString(r.SummaryKey), r.Attempts, r.LastError)
 	if err != nil {
 		return false, err
 	}

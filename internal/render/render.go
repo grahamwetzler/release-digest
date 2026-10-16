@@ -16,6 +16,7 @@ import (
 	"release-digest/internal/config"
 	"release-digest/internal/feed"
 	"release-digest/internal/store"
+	"release-digest/internal/summarize"
 )
 
 // Format is one served rendering of the feed.
@@ -52,11 +53,12 @@ func Channel(c *config.Config, f Format, generator string) feed.Channel {
 // ExcerptChars is how much of the notes a fallback item shows (§3.3).
 const ExcerptChars = 600
 
-// Item turns a stored release into a feed item. notes is the release's
-// notes text, if any. Until summaries exist (milestone 4) a visible item is
-// a fallback, an excerpt of the notes, or a no_notes item saying there are
-// none (§3.2, §3.3, §6).
-func Item(r *store.Release, notes string) feed.Item {
+// Item turns a stored release into a feed item (§6). notes is the
+// release's notes text, if any, and sum its summary if it is summarized. A
+// summarized item shows the summary; a fallback shows an excerpt of the
+// notes; a no_notes item says there are none (§3.2, §3.3). A summarized
+// row whose summary can't be read is shown as a fallback.
+func Item(r *store.Release, notes string, sum *store.Summary) feed.Item {
 	version := r.Tag
 	if r.Name != "" && r.Name != r.Tag {
 		version = r.Name
@@ -66,6 +68,11 @@ func Item(r *store.Release, notes string) feed.Item {
 	if r.Prerelease {
 		title += " (pre-release)"
 		cats = append(cats, "prerelease")
+	}
+	if r.State == store.StateSummarized && sum != nil {
+		if s, err := summarize.Decode(sum.JSON); err == nil {
+			return summarized(r, title, cats, s, sum.Model)
+		}
 	}
 	link := "Release notes"
 	if r.Kind == "tag" {
@@ -88,7 +95,7 @@ func Item(r *store.Release, notes string) feed.Item {
 		fmt.Fprintf(&body, ` · <a href="%s">Diff since %s</a>`, html.EscapeString(diff), html.EscapeString(r.PrevTag))
 	}
 	body.WriteString("</p>")
-	if r.State == store.StateFallback {
+	if r.State == store.StateFallback || r.State == store.StateSummarized {
 		body.WriteString("\n<p><small>Summary pending.")
 		if from := sourceNames[r.NotesSource]; from != "" && excerpt != "" {
 			body.WriteString(" Excerpt from " + from + ".")
@@ -100,6 +107,75 @@ func Item(r *store.Release, notes string) feed.Item {
 		Link:        r.HTMLURL,
 		GUID:        r.GUID,
 		Description: desc,
+		ContentHTML: body.String(),
+		Categories:  cats,
+		Published:   r.Published,
+		Updated:     r.ContentUpdated,
+	}
+}
+
+// sections are a summary's lists, in the order shown (§6).
+var sections = []struct {
+	title string
+	items func(*summarize.Summary) []string
+}{
+	{"Breaking changes", func(s *summarize.Summary) []string { return s.Breaking }},
+	{"Features", func(s *summarize.Summary) []string { return s.Features }},
+	{"Fixes", func(s *summarize.Summary) []string { return s.Fixes }},
+	{"Security", func(s *summarize.Summary) []string { return s.Security }},
+}
+
+// summarized is the item for a summarized release (§6): the headline in the
+// title, the lists as sections, the links, and a footer naming the model
+// and the notes source. A noise-only release is the headline alone.
+func summarized(r *store.Release, title string, cats []string, s *summarize.Summary, model string) feed.Item {
+	title += " — " + s.Headline
+	if len(s.Breaking) > 0 {
+		title = "⚠ " + title
+		cats = append(cats, "breaking")
+	}
+	if len(s.Security) > 0 {
+		cats = append(cats, "security")
+	}
+	var body, desc strings.Builder
+	fmt.Fprintf(&body, "<p><strong>%s</strong></p>\n", html.EscapeString(s.Headline))
+	desc.WriteString(s.Headline)
+	if s.NoiseOnly {
+		body.WriteString("<p>No user-facing changes.</p>\n")
+		desc.WriteString(" No user-facing changes.")
+	} else {
+		for _, sec := range sections {
+			items := sec.items(s)
+			if len(items) == 0 {
+				continue
+			}
+			fmt.Fprintf(&body, "<h4>%s</h4><ul>", sec.title)
+			fmt.Fprintf(&desc, " %s:", sec.title)
+			for _, it := range items {
+				fmt.Fprintf(&body, "<li>%s</li>", html.EscapeString(it))
+				desc.WriteString(" • " + it)
+			}
+			body.WriteString("</ul>\n")
+		}
+	}
+	link := "Full release notes"
+	if r.Kind == "tag" {
+		link = "Tag"
+	}
+	fmt.Fprintf(&body, `<p><a href="%s">%s</a>`, html.EscapeString(r.HTMLURL), link)
+	if diff := DiffURL(r); diff != "" {
+		fmt.Fprintf(&body, ` · <a href="%s">Diff since %s</a>`, html.EscapeString(diff), html.EscapeString(r.PrevTag))
+	}
+	body.WriteString("</p>\n<p><small>Summarized by " + html.EscapeString(model))
+	if from := sourceNames[r.NotesSource]; from != "" {
+		body.WriteString(" from " + from)
+	}
+	body.WriteString(".</small></p>")
+	return feed.Item{
+		Title:       title,
+		Link:        r.HTMLURL,
+		GUID:        r.GUID,
+		Description: desc.String(),
 		ContentHTML: body.String(),
 		Categories:  cats,
 		Published:   r.Published,
@@ -177,7 +253,11 @@ func Build(ctx context.Context, st *store.Store, c *config.Config, generator str
 		if err != nil {
 			return nil, err
 		}
-		items[i] = Item(r, notes)
+		sum, err := st.Summary(ctx, r.SummaryKey)
+		if err != nil {
+			return nil, err
+		}
+		items[i] = Item(r, notes, sum)
 		if u := r.ContentUpdated; u.After(lastBuild) {
 			lastBuild = u
 		}

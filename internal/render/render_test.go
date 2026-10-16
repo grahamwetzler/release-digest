@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"release-digest/internal/config"
 	"release-digest/internal/ident"
 	"release-digest/internal/store"
+	"release-digest/internal/summarize"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files")
@@ -66,9 +68,16 @@ func TestGolden(t *testing.T) {
 		{"o/unicode", "版本-1", "", "tag"},
 	} {
 		pub := now.Add(-time.Duration(i) * day)
-		hash, state, prev := "", store.StateFallback, ""
+		hash, state, prev, key := "", store.StateFallback, "", ""
 		if i == 1 {
 			state, prev = store.StateNoNotes, "service/s3/v1.2.2"
+		}
+		if i == 2 {
+			state, prev, key = store.StateSummarized, "0.9.0", "k1"
+			hash, _ = st.PutNotes(ctx, "notes")
+			sum := &summarize.Summary{Headline: "Parser rewrite <fast> & safe", Breaking: []string{"Drops Go 1.25"},
+				Features: []string{"Streams `a<b>`"}, Security: []string{"Fixes GHSA-xxxx-yyyy-zzzz"}}
+			st.PutSummary(ctx, &store.Summary{Key: key, Model: "qwen3:14b", JSON: sum.Encode(), Created: now})
 		}
 		if i == 0 {
 			prev = "0.9.3"
@@ -79,6 +88,7 @@ func TestGolden(t *testing.T) {
 			Repo: r.repo, Tag: r.tag, GUID: ident.GUID(r.repo, r.tag), Kind: r.kind, Name: r.name,
 			HTMLURL: "https://github.com/" + r.repo + "/releases/tag/" + r.tag, Prerelease: i == 2,
 			Published: pub, FirstSeen: pub, ContentUpdated: pub.Add(time.Hour), State: state, Origin: "live", PrevTag: prev,
+			SummaryKey: key,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -163,7 +173,7 @@ func TestPlainText(t *testing.T) {
 
 func TestFallbackItem(t *testing.T) {
 	r := &store.Release{Repo: "o/r", Tag: "v1", HTMLURL: "https://github.com/o/r/releases/tag/v1", State: store.StateFallback, Kind: "release", NotesSource: "changelog"}
-	it := Item(r, strings.Repeat("word ", 200))
+	it := Item(r, strings.Repeat("word ", 200), nil)
 	if n := utf8.RuneCountInString(it.Description); n > ExcerptChars+1 || !strings.HasSuffix(it.Description, "…") {
 		t.Errorf("description is %d runes: %q", n, it.Description)
 	}
@@ -172,7 +182,7 @@ func TestFallbackItem(t *testing.T) {
 			t.Errorf("missing %q in %s", want, it.ContentHTML)
 		}
 	}
-	empty := Item(r, "")
+	empty := Item(r, "", nil)
 	if empty.Description != "Release notes for o/r v1." || !strings.Contains(empty.ContentHTML, ">Release notes</a>") {
 		t.Errorf("no notes: %+v", empty)
 	}
@@ -181,7 +191,7 @@ func TestFallbackItem(t *testing.T) {
 func TestNoNotesItem(t *testing.T) {
 	r := &store.Release{Repo: "o/r", Tag: "pkg/v2", PrevTag: "pkg/v1", Kind: "tag", State: store.StateNoNotes,
 		HTMLURL: "https://github.com/o/r/releases/tag/pkg/v2"}
-	it := Item(r, "")
+	it := Item(r, "", nil)
 	if it.Description != "o/r pkg/v2 released — no release notes published." {
 		t.Errorf("description = %q", it.Description)
 	}
@@ -201,5 +211,47 @@ func TestDiffURL(t *testing.T) {
 		if got := DiffURL(&store.Release{HTMLURL: tc.html, PrevTag: tc.prev, Tag: tc.tag}); got != tc.want {
 			t.Errorf("DiffURL(%q, %q) = %q, want %q", tc.prev, tc.tag, got, tc.want)
 		}
+	}
+}
+
+func TestSummarizedItem(t *testing.T) {
+	r := &store.Release{Repo: "o/r", Tag: "v2", PrevTag: "v1", Kind: "release", State: store.StateSummarized,
+		NotesSource: "compare", HTMLURL: "https://github.com/o/r/releases/tag/v2"}
+	full := &summarize.Summary{Headline: "Adds streaming", Breaking: []string{"Removes X"}, Fixes: []string{"Fixes <b>"}}
+	it := Item(r, "raw notes", &store.Summary{Model: "m", JSON: full.Encode()})
+	if it.Title != "⚠ o/r v2 — Adds streaming" {
+		t.Errorf("title = %q", it.Title)
+	}
+	if it.Description != "Adds streaming Breaking changes: • Removes X Fixes: • Fixes <b>" {
+		t.Errorf("description = %q", it.Description)
+	}
+	for _, want := range []string{
+		"<p><strong>Adds streaming</strong></p>",
+		"<h4>Breaking changes</h4><ul><li>Removes X</li></ul>",
+		"<h4>Fixes</h4><ul><li>Fixes &lt;b&gt;</li></ul>",
+		`<a href="https://github.com/o/r/compare/v1...v2">Diff since v1</a>`,
+		"<small>Summarized by m from the commit log.</small>",
+	} {
+		if !strings.Contains(it.ContentHTML, want) {
+			t.Errorf("missing %q in %s", want, it.ContentHTML)
+		}
+	}
+	if strings.Contains(it.ContentHTML, "Features") || strings.Contains(it.ContentHTML, "raw notes") {
+		t.Errorf("empty section or raw notes shown: %s", it.ContentHTML)
+	}
+	if !slices.Equal(it.Categories, []string{"o/r", "breaking"}) {
+		t.Errorf("categories = %v", it.Categories)
+	}
+
+	noise := &summarize.Summary{Headline: "Dependency updates", Fixes: []string{"ignored"}, NoiseOnly: true}
+	it = Item(r, "", &store.Summary{Model: "m", JSON: noise.Encode()})
+	if !strings.Contains(it.ContentHTML, "<p>No user-facing changes.</p>") || strings.Contains(it.ContentHTML, "ignored") {
+		t.Errorf("noise-only content = %s", it.ContentHTML)
+	}
+
+	// An unreadable summary falls back to the excerpt.
+	it = Item(r, "raw notes", &store.Summary{Model: "m", JSON: "{"})
+	if it.Title != "o/r v2" || it.Description != "raw notes" {
+		t.Errorf("unreadable summary: %+v", it)
 	}
 }

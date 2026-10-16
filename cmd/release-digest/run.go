@@ -35,8 +35,8 @@ const stateLastTick = "last_tick"
 const guardTimeout = 30 * time.Second
 
 // tick runs one scheduler pass: the visibility sweep and poll (once the
-// token guard has passed), the gated promotion of due fallbacks, and the
-// render, which always runs (§3). last_tick is recorded only after a fully
+// token guard has passed), the summarize stage, the gated promotion of due
+// fallbacks, and the render, which always runs (§3). last_tick is recorded only after a fully
 // successful pass, so a restart after a failed one retries at once.
 func (e *env) tick(ctx context.Context, srv *server.Server) error {
 	start := time.Now()
@@ -54,6 +54,9 @@ func (e *env) tick(ctx context.Context, srv *server.Server) error {
 		}
 	} else if isGuardError(err) {
 		errs = append(errs, err)
+	}
+	if err := e.summarize(ctx, id, srv); err != nil {
+		errs = append(errs, fmt.Errorf("summarize: %w", err))
 	}
 	promoted, err := e.poller.Promote(ctx, id)
 	if err != nil {
@@ -74,6 +77,27 @@ func (e *env) tick(ctx context.Context, srv *server.Server) error {
 	}
 	e.log.Info("tick done", "tick", id, "published", promoted, "took", time.Since(start).Round(time.Millisecond))
 	return nil
+}
+
+// summarize runs the summarize stage. It always runs after poll, whatever
+// poll's outcome; its gate is the tick's confirmations plus a just-in-time
+// check (§3.1). Every few summaries it publishes a render, so a long stage
+// shows its progress (§3).
+func (e *env) summarize(ctx context.Context, tick int64, srv *server.Server) error {
+	e.summ.Gate = func(ctx context.Context, repo string) (bool, error) {
+		return e.poller.CheckNow(ctx, repo, tick, "summarize")
+	}
+	e.summ.Progress = func(ctx context.Context) {
+		feeds, err := render.Publish(ctx, e.store, e.cfg, generator(), time.Now())
+		if err != nil {
+			e.log.Warn("render during the summarize stage failed; the tick's render retries", "err", err)
+			return
+		}
+		if srv != nil {
+			srv.Set(feeds)
+		}
+	}
+	return e.summ.Pass(ctx, tick)
 }
 
 // cmdRun is the long-running mode: the scheduler plus the HTTP server.

@@ -155,3 +155,33 @@ func TestMigration3KeepsReleaseBodies(t *testing.T) {
 		}
 	}
 }
+
+func TestMigration6AdvancesSummarizedItems(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rd.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range append(migrations[:5:5], `CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (5)`,
+		`INSERT INTO releases (repo, tag, guid, kind, html_url, first_seen_at, state, content_updated_at, next_attempt_at, origin)
+			VALUES ('o/r', 'v1', 'g1', 'release', 'u', 0, 'summarized', 1000, 0, 'live'),
+			       ('o/r', 'v2', 'g2', 'release', 'u', 0, 'fallback', 1000, 0, 'live')`) {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	before := time.Now().Truncate(time.Millisecond)
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if r, err := s.Release(ctx, "o/r", "v1"); err != nil || r.ContentUpdated.Before(before) {
+		t.Errorf("summarized: updated %v, %v; want ≥ %v", r.ContentUpdated, err, before)
+	}
+	if r, err := s.Release(ctx, "o/r", "v2"); err != nil || !r.ContentUpdated.Equal(time.UnixMilli(1000)) {
+		t.Errorf("fallback: updated %v, %v; want unchanged", r.ContentUpdated, err)
+	}
+}

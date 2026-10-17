@@ -186,6 +186,10 @@ var migrations = []string{
 	// 5: resummarize (docs/summaries.md) records when a fresh summary was asked for; a
 	// summary created after that satisfies it, and clears it.
 	`ALTER TABLE releases ADD COLUMN resummarize INTEGER NOT NULL DEFAULT 0; -- request time, 0 for none`,
+	// 6: summarized items' titles dropped the headline (docs/feed.md), so their
+	// content changed: advance their updated time once.
+	`UPDATE releases SET content_updated_at = max(coalesce(content_updated_at, 0), CAST(unixepoch('subsec') * 1000 AS INTEGER))
+		WHERE state = 'summarized';`,
 }
 
 // Open opens (creating if needed) the database at path and migrates it.

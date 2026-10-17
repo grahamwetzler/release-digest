@@ -38,6 +38,8 @@ changes only in these cases, and each one advances its updated time:
   `fallback` → `summarized`, `fallback` → `no_notes`, `no_notes` → `fallback`
 - a change to its urgency marking ([Security alerts](security-alerts.md))
 - an explicit `resummarize`
+- a change to the item format: shortening summarized titles to `{repo}
+  {version}` advanced every summarized item once
 
 An item leaves the feed only through confirmed deletion (7 days after an
 existence check returns 404, see [Polling GitHub](polling.md#deletion-detection))

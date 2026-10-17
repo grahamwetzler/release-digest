@@ -56,8 +56,8 @@ func TestResummarizeThenBuild(t *testing.T) {
 	}
 	defer st.Close()
 	rss, _ := st.Rendered(context.Background(), "feed.xml")
-	if rss == nil || !strings.Contains(string(rss.Bytes), "o/r v1.1.0 — Starts much faster") ||
-		!strings.Contains(string(rss.Bytes), "o/r v1.0.0 — Starts faster") {
+	if rss == nil || !strings.Contains(string(rss.Bytes), "<title>o/r v1.1.0</title>\n      <link>https://github.com/o/r/releases/tag/v1.1.0</link>\n      <description>Starts much faster") ||
+		!strings.Contains(string(rss.Bytes), "<description>Starts faster") {
 		t.Errorf("feed after resummarize:\n%s", rss.Bytes)
 	}
 }

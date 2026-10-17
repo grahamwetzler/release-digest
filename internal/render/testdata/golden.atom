@@ -32,7 +32,7 @@
   </entry>
   <entry>
     <id>urn:uuid:6bd39253-6b16-5373-9303-a64614c4a9a7</id>
-    <title type="text">⚠ o/semver Build &lt;5&gt; &amp; more (pre-release) — Parser rewrite &lt;fast&gt; &amp; safe</title>
+    <title type="text">⚠ o/semver Build &lt;5&gt; &amp; more (pre-release)</title>
     <link rel="alternate" type="text/html" href="https://github.com/o/semver/releases/tag/1.0.0+build.5"></link>
     <published>2026-10-13T12:00:00Z</published>
     <updated>2026-10-13T13:00:00Z</updated>

@@ -40,7 +40,7 @@ func TestSummarizeDryRun(t *testing.T) {
 		"Previous version: v1.0.0",
 		"<instructions>\nLead with startup time.\n</instructions>",
 		`"headline": "Starts faster"`,
-		"title: o/r v1.1.0 — Starts faster",
+		"title: o/r v1.1.0\n",
 		"Summarized by test/model from the release notes.",
 	} {
 		if !strings.Contains(out.String(), want) {

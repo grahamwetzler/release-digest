@@ -135,11 +135,10 @@ var sections = []struct {
 	{"Security", func(s *summarize.Summary) []string { return s.Security }},
 }
 
-// summarized is the item for a summarized release (docs/feed.md): the headline in the
-// title, the lists as sections, the links, and a footer naming the model
+// summarized is the item for a summarized release (docs/feed.md): the headline
+// atop the body, the lists as sections, the links, and a footer naming the model
 // and the notes source. A noise-only release is the headline alone.
 func summarized(r *store.Release, title string, cats []string, s *summarize.Summary, model string) feed.Item {
-	title += " — " + s.Headline
 	if len(s.Breaking) > 0 {
 		title = "⚠ " + title
 		cats = append(cats, "breaking")

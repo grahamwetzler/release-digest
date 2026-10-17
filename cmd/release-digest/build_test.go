@@ -164,7 +164,7 @@ func TestBuildSummarizesWithTheLLM(t *testing.T) {
 	}
 	defer st.Close()
 	rss, _ := st.Rendered(context.Background(), "feed.xml")
-	for _, want := range []string{"⚠ o/r v1.1.0 — Starts faster", "Summarized by test/model from the release notes.", "<category>breaking</category>"} {
+	for _, want := range []string{"<title>⚠ o/r v1.1.0</title>", "Summarized by test/model from the release notes.", "<category>breaking</category>"} {
 		if rss == nil || !strings.Contains(string(rss.Bytes), want) {
 			t.Errorf("feed lacks %q:\n%s", want, rss.Bytes)
 		}

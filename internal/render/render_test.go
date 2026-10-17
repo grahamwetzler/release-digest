@@ -242,7 +242,7 @@ func TestSummarizedItem(t *testing.T) {
 		NotesSource: "compare", HTMLURL: "https://github.com/o/r/releases/tag/v2"}
 	full := &summarize.Summary{Headline: "Adds streaming", Breaking: []string{"Removes X"}, Fixes: []string{"Fixes <b>"}}
 	it := Item(r, "raw notes", &store.Summary{Model: "m", JSON: full.Encode()})
-	if it.Title != "⚠ o/r v2 — Adds streaming" {
+	if it.Title != "⚠ o/r v2" {
 		t.Errorf("title = %q", it.Title)
 	}
 	if it.Description != "Adds streaming Breaking changes: • Removes X Fixes: • Fixes <b>" {
@@ -297,7 +297,7 @@ func TestUrgentItemIsMarked(t *testing.T) {
 	r.State = store.StateSummarized
 	sum := &summarize.Summary{Headline: "Fixes RCE", Breaking: []string{"Drops X"}, Security: []string{"Fixes CVE-2026-1"}}
 	it = Item(r, "", &store.Summary{Model: "m", JSON: sum.Encode()})
-	if it.Title != "🚨 ⚠ o/r v2 — Fixes RCE" || !slices.Equal(it.Categories, []string{"o/r", "breaking", "security", "security-urgent"}) {
+	if it.Title != "🚨 ⚠ o/r v2" || !slices.Equal(it.Categories, []string{"o/r", "breaking", "security", "security-urgent"}) {
 		t.Errorf("summarized: %q, %v", it.Title, it.Categories)
 	}
 	r.Urgency = store.UrgencyAdvisory

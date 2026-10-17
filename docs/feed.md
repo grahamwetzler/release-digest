@@ -45,8 +45,8 @@ or `feed.max_items` rollover.
 
 ## Item format
 
-**Title:** `{repo} {version} — {headline}`, for example
-`astral-sh/uv 0.9.4 — Faster lockfile resolution for workspaces`.
+**Title:** `{repo} {version}`, for example `astral-sh/uv 0.9.4`. The
+headline leads the description.
 
 - A `⚠` prefix marks releases with breaking changes, and `🚨` urgent security
   releases.

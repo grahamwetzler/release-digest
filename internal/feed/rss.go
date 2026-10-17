@@ -28,6 +28,7 @@ type Channel struct {
 	Description string
 	Language    string
 	Image       string
+	ImageSize   int    // Image's width and height in pixels, if square; RSS assumes 88×31
 	Author      string // feed-level author, required by Atom
 	TTL         int
 	SelfURL     string    // public URL of this feed, for atom:link rel=self
@@ -83,9 +84,11 @@ type atomLink struct {
 }
 
 type rssImage struct {
-	URL   string `xml:"url"`
-	Title string `xml:"title"`
-	Link  string `xml:"link"`
+	URL    string `xml:"url"`
+	Title  string `xml:"title"`
+	Link   string `xml:"link"`
+	Width  int    `xml:"width,omitempty"`
+	Height int    `xml:"height,omitempty"`
 }
 
 type rssItem struct {
@@ -141,7 +144,7 @@ func RSS(ch Channel, items []Item) ([]byte, error) {
 		c.LastBuildDate = RSSDate(ch.LastBuild)
 	}
 	if ch.Image != "" {
-		c.Image = &rssImage{URL: ch.Image, Title: c.Title, Link: ch.Link}
+		c.Image = &rssImage{URL: ch.Image, Title: c.Title, Link: ch.Link, Width: ch.ImageSize, Height: ch.ImageSize}
 	}
 	var newest time.Time
 	for _, it := range items {

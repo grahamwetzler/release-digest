@@ -36,7 +36,10 @@ var (
 
 // IconPath is where the feed's image is served, below public_base_url: the
 // GitHub mark, white on black, at the 144px RSS maximum.
-const IconPath = "icon.png"
+const (
+	IconPath = "icon.png"
+	IconSize = 144
+)
 
 //go:embed icon.png
 var Icon []byte
@@ -52,6 +55,7 @@ func Channel(c *config.Config, f Format, generator string) feed.Channel {
 		Description: c.Feed.Description,
 		Language:    "en",
 		Image:       c.PublicBaseURL + "/" + IconPath,
+		ImageSize:   IconSize,
 		Author:      c.Feed.Title,
 		TTL:         c.Feed.TTL,
 		SelfURL:     c.PublicBaseURL + "/" + f.Path,

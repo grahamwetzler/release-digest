@@ -15,6 +15,8 @@
       <url>https://rss.example.com/icon.png</url>
       <title>Release Digest</title>
       <link>https://rss.example.com/</link>
+      <width>144</width>
+      <height>144</height>
     </image>
     <item>
       <title>astral-sh/uv 0.9.4</title>

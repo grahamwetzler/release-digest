@@ -5,6 +5,7 @@ package render
 import (
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"html"
@@ -33,6 +34,13 @@ var (
 	Formats = []Format{RSS, Atom}
 )
 
+// IconPath is where the feed's image is served, below public_base_url: the
+// GitHub mark, white on black, at the 144px RSS maximum.
+const IconPath = "icon.png"
+
+//go:embed icon.png
+var Icon []byte
+
 // Check runs the format's offline checks on data.
 func (f Format) Check(data []byte) []string { return f.check(data) }
 
@@ -43,6 +51,7 @@ func Channel(c *config.Config, f Format, generator string) feed.Channel {
 		Link:        c.PublicBaseURL + "/",
 		Description: c.Feed.Description,
 		Language:    "en",
+		Image:       c.PublicBaseURL + "/" + IconPath,
 		Author:      c.Feed.Title,
 		TTL:         c.Feed.TTL,
 		SelfURL:     c.PublicBaseURL + "/" + f.Path,

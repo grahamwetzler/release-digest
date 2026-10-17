@@ -11,6 +11,11 @@
     <docs>https://www.rssboard.org/rss-specification</docs>
     <generator>release-digest/test</generator>
     <ttl>60</ttl>
+    <image>
+      <url>https://rss.example.com/icon.png</url>
+      <title>Release Digest</title>
+      <link>https://rss.example.com/</link>
+    </image>
     <item>
       <title>astral-sh/uv 0.9.4</title>
       <link>https://github.com/astral-sh/uv/releases/tag/0.9.4</link>

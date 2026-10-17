@@ -2,9 +2,15 @@
 
 The feed is rendered to bytes after any change and held in memory and in the
 store, so a restart serves immediately. HTTP serves `/feed.xml` (RSS 2.0) and
-`/feed.atom` (Atom 1.0) with `ETag` and `Last-Modified`, plus `/healthz`. The
-code is in [`internal/render`](../internal/render), [`internal/feed`](../internal/feed)
-and [`internal/server`](../internal/server).
+`/feed.atom` (Atom 1.0) with `ETag` and `Last-Modified`, plus `/icon.png` and
+`/healthz`. The code is in [`internal/render`](../internal/render),
+[`internal/feed`](../internal/feed) and [`internal/server`](../internal/server).
+
+## Feed image
+
+The feed's image is the GitHub mark, white on a black square, 144px (the RSS
+maximum). It's compiled into the binary and served at `/icon.png`; RSS points
+to it from `<image>`, Atom from `<icon>` (Atom's `<logo>` is meant to be 2:1).
 
 ## Identity and timestamps
 

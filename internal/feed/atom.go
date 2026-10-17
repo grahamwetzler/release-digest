@@ -19,7 +19,7 @@ type atomFeed struct {
 	Author    atomPerson   `xml:"author"`
 	Links     []atomLinkEl `xml:"link"`
 	Generator string       `xml:"generator,omitempty"`
-	Logo      string       `xml:"logo,omitempty"`
+	Icon      string       `xml:"icon,omitempty"` // square, so <icon> rather than the 2:1 <logo>
 	Entries   []atomEntry  `xml:"entry"`
 }
 
@@ -78,7 +78,7 @@ func Atom(ch Channel, items []Item) ([]byte, error) {
 		Title:     atomText{Type: "text", Text: clean(ch.Title)},
 		Author:    atomPerson{Name: clean(ch.Author)},
 		Generator: clean(ch.Generator),
-		Logo:      ch.Image,
+		Icon:      ch.Image,
 		Links: []atomLinkEl{
 			{Rel: "self", Type: "application/atom+xml", Href: ch.SelfURL},
 			{Rel: "alternate", Type: "text/html", Href: ch.Link},

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -52,6 +53,11 @@ func TestServe(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), `href="https://rss.example.com/feed.atom"`) {
 		t.Errorf("index:\n%s", body)
+	}
+	resp = get(t, h, "/icon.png", nil)
+	body, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/png" || !bytes.HasPrefix(body, []byte("\x89PNG")) {
+		t.Errorf("icon: %s %v", resp.Status, resp.Header)
 	}
 	if resp := get(t, h, "/nope", nil); resp.StatusCode != 404 {
 		t.Errorf("unknown path: %s", resp.Status)

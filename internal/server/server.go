@@ -63,6 +63,11 @@ func (s *Server) Handler() http.Handler {
 	for _, f := range render.Formats {
 		mux.HandleFunc("GET /"+f.Path, func(w http.ResponseWriter, r *http.Request) { s.serveFeed(w, r, f) })
 	}
+	mux.HandleFunc("GET /"+render.IconPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(render.Icon)
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		if s.Health != nil {
@@ -100,6 +105,7 @@ var index = template.Must(template.New("index").Parse(`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
+<link rel="icon" type="image/png" href="{{.Icon}}">
 <link rel="alternate" type="application/rss+xml" title="{{.Title}}" href="{{.RSS}}">
 <link rel="alternate" type="application/atom+xml" title="{{.Title}}" href="{{.Atom}}">
 <style>
@@ -115,7 +121,9 @@ h1{margin:0 0 1rem;font-size:1.75rem}
 `))
 
 func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
-	data := struct{ Title, RSS, Atom string }{s.title, s.baseURL + "/" + render.RSS.Path, s.baseURL + "/" + render.Atom.Path}
+	data := struct{ Title, RSS, Atom, Icon string }{
+		s.title, s.baseURL + "/" + render.RSS.Path, s.baseURL + "/" + render.Atom.Path, s.baseURL + "/" + render.IconPath,
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := index.Execute(w, data); err != nil {
 		s.log.Error("rendering index", "err", err)

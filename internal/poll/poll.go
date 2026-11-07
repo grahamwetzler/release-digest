@@ -659,7 +659,7 @@ func patternOf(r *config.Regex) *regexp.Regexp {
 
 // filtered reports whether a row is recorded as skipped (docs/polling.md):
 // unrecognized tags (unless tag_pattern matches them), tag_pattern misses,
-// exclude_pattern matches and unwanted pre-releases.
+// exclude_pattern matches, versions at or below skip_through and unwanted pre-releases.
 func (p *Poller) filtered(r *config.Repo, row *store.Release) bool {
 	tp, xp := patternOf(r.TagPattern), patternOf(r.ExcludePattern)
 	switch {
@@ -669,10 +669,22 @@ func (p *Poller) filtered(r *config.Repo, row *store.Release) bool {
 		return true
 	case xp != nil && xp.MatchString(row.Tag):
 		return true
+	case r.SkipThrough != "" && skippedThrough(r, row):
+		return true
 	case row.Prerelease && !*r.IncludePrereleases:
 		return true
 	}
 	return false
+}
+
+func skippedThrough(r *config.Repo, row *store.Release) bool {
+	if row.Version == "" {
+		return false
+	}
+	through := version.Parse(r.SkipThrough, patternOf(r.PrereleasePattern))
+	// The normalized version retains precedence but has no stream prefix.
+	v := version.Parse(row.Version, nil)
+	return through.Parsed() && row.Stream == through.Stream && version.Compare(v, through) <= 0
 }
 
 // bodyNotes records a release body on a new row. A substantive body is

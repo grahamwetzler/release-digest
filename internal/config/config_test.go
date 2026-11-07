@@ -257,3 +257,43 @@ repos:
 		t.Errorf("exactly the limit: %v", err)
 	}
 }
+
+func TestSkipThrough(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		extra string
+		want  string
+		err   string
+	}{
+		{"valid", "repos: [{repo: grafana/grafana, skip_through: v12.1.4}]", "v12.1.4", ""},
+		{"prerelease pattern", "repos: [{repo: grafana/grafana, skip_through: v12.1.4test1, prerelease_pattern: '^test'}]", "v12.1.4test1", ""},
+		{"invalid", "repos: [{repo: grafana/grafana, skip_through: latest}]", "", `repos[0].skip_through: must be a version`},
+		{"empty", `repos: [{repo: grafana/grafana, skip_through: ""}]`, "", `repos[0].skip_through: must be a version`},
+		{"defaults", "defaults: {skip_through: v12.1.4}", "", "defaults.skip_through: is per repo"},
+		{"merged valid", "repos: [{repo: o/r, <<: {skip_through: v12.1.4}}]", "v12.1.4", ""},
+		{"merged invalid", "repos: [{repo: o/r, <<: {skip_through: latest}}]", "", "repos[0].skip_through: must be a version"},
+		{"merged empty is unset", `repos: [{repo: o/r, <<: {skip_through: ""}}]`, "", ""},
+		{"merged defaults", "defaults: {<<: {skip_through: v12.1.4}}", "", "defaults.skip_through: is per repo"},
+		{"aliased invalid", "repos: [{repo: o/source, skip_through: &cutoff latest}, {repo: o/r, skip_through: *cutoff}]", "", "repos[1].skip_through: must be a version"},
+		{"aliased defaults", "repos: [{repo: o/r, <<: &cutoff {skip_through: v12.1.4}}]\ndefaults: {<<: *cutoff}", "", "defaults.skip_through: is per repo"},
+		{"aliased defaults mapping", "repos: [{repo: o/r, <<: &cutoff {skip_through: v12.1.4}}]\ndefaults: *cutoff", "", "defaults.skip_through: is per repo"},
+		{"merged override", "repos: [{repo: o/r, <<: {skip_through: latest}, skip_through: v12.1.4}]", "v12.1.4", ""},
+		{"merged empty override", `repos: [{repo: o/r, <<: {skip_through: v12.1.4}, skip_through: ""}]`, "", "repos[0].skip_through: must be a version"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := Load(write(t, minimal+tt.extra+"\n"), envOf(nil))
+			if tt.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.err) {
+					t.Fatalf("err = %v, want %q", err, tt.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.Repos[0].SkipThrough; got != tt.want {
+				t.Errorf("skip_through = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

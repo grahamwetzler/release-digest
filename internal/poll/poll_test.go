@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -275,6 +276,142 @@ repos:
 	}
 	if r := h.row("o/pre", "v2.0.0-rc.1"); r.State != store.StatePending || !r.Prerelease {
 		t.Errorf("include_prereleases: %+v", r)
+	}
+}
+
+func TestSkipThrough(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		tag     string
+		through string
+		include bool
+		want    bool
+		pattern string
+	}{
+		{"below", "v12.1.3", "v12.1.4", true, true, ""},
+		{"equal", "v12.1.4", "v12.1.4", true, true, ""},
+		{"above", "v12.1.5", "v12.1.4", true, false, ""},
+		{"another stream", "service/api/v12.1.3", "v12.1.4", true, false, ""},
+		{"unparsed", "latest", "v12.1.4", true, false, ""},
+		{"threshold prerelease", "v12.1.4-rc.1", "v12.1.4", true, true, ""},
+		{"next prerelease", "v12.1.5-rc.1", "v12.1.4", true, false, ""},
+		{"same named stream", "service/api/v12.1.3", "service/api/12.1.4", true, true, ""},
+		{"bare cutoff", "v1.2.3", "1.2.3", true, true, ""},
+		{"bare tag", "1.2.4", "v1.2.3", true, false, ""},
+		{"four components", "v1.2.3.4", "1.2.3.3", true, false, ""},
+		{"zero fourth component", "v1.2.3.0", "1.2.3", true, true, ""},
+		{"build metadata", "v1.2.3+build.9", "1.2.3+build.1", true, true, ""},
+		{"numeric prerelease below", "v1.2.3-rc2", "v1.2.3-rc10", true, true, ""},
+		{"numeric prerelease above", "v1.2.3-rc10", "v1.2.3-rc2", true, false, ""},
+		{"compact prerelease", "v1.2.3rc1", "v1.2.3-rc.2", true, true, ""},
+		{"stable above prerelease cutoff", "v1.2.3", "v1.2.3-rc.2", true, false, ""},
+		{"custom prerelease below", "v12.1.4test1", "v12.1.4test2", true, true, "^test"},
+		{"custom prerelease above", "v12.1.4test2", "v12.1.4test1", true, false, "^test"},
+		{"custom pattern replaces default", "v1.2.3beta1", "v1.2.3-rc.1", true, false, "^test"},
+		{"unset", "v12.1.3", "", true, false, ""},
+		{"prereleases excluded independently", "v12.1.5-rc.1", "v12.1.4", false, true, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &config.Repo{Repo: "o/r", RepoOptions: config.RepoOptions{
+				SkipThrough: tt.through, IncludePrereleases: &tt.include,
+				// Allow unparsed tags so the existing unrecognized-tag filter
+				// cannot mask skip_through hiding something it cannot compare.
+				TagPattern: &config.Regex{Re: regexp.MustCompile(`.*`)},
+			}}
+			if tt.pattern != "" {
+				r.PrereleasePattern = &config.Regex{Re: regexp.MustCompile(tt.pattern)}
+			}
+			p := &Poller{}
+			row := p.newRow(r, entry{Tag: tt.tag}, t0)
+			if got := p.filtered(r, row); got != tt.want {
+				t.Errorf("filtered(%q, skip_through %q) = %v, want %v", tt.tag, tt.through, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSkipThroughUsesRowClassification(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		row     store.Release
+		pattern string
+		include bool
+		want    bool
+	}{
+		{"stored stable", store.Release{Tag: "v1.2.3test2", Version: "1.2.3+test2"}, "^test", true, false},
+		{"stored prerelease", store.Release{Tag: "v1.2.3test2", Version: "1.2.3-test2", Prerelease: true}, "", true, true},
+		{"stored stream", store.Release{Tag: "service/v1.2.2", Stream: "service/", Version: "1.2.2"}, "", true, false},
+		{"stored stream differs from tag", store.Release{Tag: "service/v1.2.2", Version: "1.2.2"}, "", true, true},
+		{"stored unparsed", store.Release{Tag: "v1.2.2"}, "", true, false},
+		{"github prerelease allowed", store.Release{Tag: "v1.2.3", Version: "1.2.3", Prerelease: true}, "", true, false},
+		{"github prerelease excluded", store.Release{Tag: "v1.2.3", Version: "1.2.3", Prerelease: true}, "", false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &config.Repo{RepoOptions: config.RepoOptions{
+				SkipThrough: "v1.2.3-zzz", IncludePrereleases: &tt.include,
+				TagPattern: &config.Regex{Re: regexp.MustCompile(`.*`)},
+			}}
+			if tt.pattern != "" {
+				r.PrereleasePattern = &config.Regex{Re: regexp.MustCompile(tt.pattern)}
+			}
+			if got := (&Poller{}).filtered(r, &tt.row); got != tt.want {
+				t.Errorf("filtered(%+v) = %v, want %v", tt.row, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSkipThroughChangesOnlyNewRows(t *testing.T) {
+	h := newHarness(t, `defaults: {backfill: 10}
+repos: [{repo: o/r, skip_through: v12.1.4}]
+`)
+	h.gh.Repo("o/r").Releases = []githubtest.Release{
+		{Tag: "v12.1.5", Body: body, Published: t0.Add(-time.Hour)},
+		{Tag: "v12.1.4", Body: body, Published: t0.Add(-2 * time.Hour)},
+	}
+	h.tick()
+	wantStates := map[string]string{"v12.1.4": store.StateSkipped, "v12.1.5": store.StatePending}
+	check := func() {
+		t.Helper()
+		for tag, want := range wantStates {
+			if row := h.row("o/r", tag); row == nil || row.State != want {
+				t.Errorf("%s = %+v, want %s", tag, row, want)
+			}
+		}
+	}
+	check()
+	// Exercise list refresh and reconciliation without waiting long enough
+	// for promotion to obscure whether filters changed a stored row's state.
+	for _, through := range []string{"v12.1.6", "v12.1.3", ""} {
+		h.p.Cfg.Repos[0].SkipThrough = through
+		h.gh.Repo("o/r").Releases[0].Body = body + " Edited: " + through
+		var below, above string
+		switch through {
+		case "v12.1.6":
+			below, above = "v12.1.5.1", "v12.1.7"
+		case "v12.1.3":
+			below, above = "v12.1.2", "v12.1.3.1"
+		default:
+			below, above = "v12.1.1", "v12.1.8"
+		}
+		wantStates[below], wantStates[above] = store.StateSkipped, store.StatePending
+		if through == "" {
+			wantStates[below] = store.StatePending
+		}
+		h.gh.Repo("o/r").Releases = append([]githubtest.Release{
+			{Tag: above, Body: body, Published: t0.Add(-time.Minute)},
+			{Tag: below, Body: body, Published: t0.Add(-2 * time.Minute)},
+		}, h.gh.Repo("o/r").Releases...)
+		rs, err := h.st.RepoState(h.ctx, "o/r")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rs.ReconcileNextPage = 1
+		if err := h.st.PutRepoState(h.ctx, rs); err != nil {
+			t.Fatal(err)
+		}
+		h.tick()
+		check()
 	}
 }
 

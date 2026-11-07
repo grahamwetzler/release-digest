@@ -110,6 +110,17 @@ Each version is classified ([Versions](versions.md)), then filtered by
 Filtered versions are recorded as `skipped`, which keeps them available as
 predecessors.
 
+The per-repo `skip_through` version also records parsed versions at or below
+it as `skipped`, using normal version precedence (including pre-releases).
+Only the same stream is compared; unparsed tags and other streams are not
+skipped by this rule. The other filters, including `include_prereleases`,
+still apply independently. Skipped rows never reach the feed, LLM or
+notifications. Like changes to `exclude_pattern`, changing `skip_through`
+after restarting affects only newly inserted rows, including missing rows
+found by reconciliation. Existing rows keep their state: raising it does not
+hide a stored release, and lowering or removing it does not revive skipped
+rows. Refreshing notes does not reapply filters.
+
 Each unseen, unfiltered version is inserted in state `pending`. Every row
 records its **origin**: `live` (normal discovery), `backfill` (first sight),
 `catchup` or `reconcile`.

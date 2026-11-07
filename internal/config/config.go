@@ -82,6 +82,7 @@ type RepoOptions struct {
 	Backfill           *int      `yaml:"backfill"`
 	MaxPages           *int      `yaml:"max_pages"`
 	Changelog          *string   `yaml:"changelog"` // auto | off | a repo-relative path
+	SkipThrough        string    `yaml:"skip_through"`
 	TagPattern         *Regex    `yaml:"tag_pattern"`
 	ExcludePattern     *Regex    `yaml:"exclude_pattern"`
 	PrereleasePattern  *Regex    `yaml:"prerelease_pattern"`

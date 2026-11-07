@@ -16,6 +16,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"release-digest/internal/version"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -484,12 +486,18 @@ func (v *validator) validate(c *Config, dir string) {
 			seen[r.Name()] = i
 		}
 		v.repoOptions(at, &r.RepoOptions, &c.Defaults)
+		if (r.SkipThrough != "" || has(v.root, "repos", i, "skip_through")) && !version.Parse(r.SkipThrough, regexOf(r.PrereleasePattern)).Parsed() {
+			v.err(append(at, "skip_through"), "must be a version, got %q", r.SkipThrough)
+		}
 	}
 }
 
 // defaults fills and validates the defaults block, which every repo inherits.
 func (v *validator) defaults(d *RepoOptions) {
 	at := p("defaults")
+	if d.SkipThrough != "" || has(v.root, "defaults", "skip_through") {
+		v.err(append(at, "skip_through"), "is per repo; set it in a repos entry")
+	}
 	if d.Sources == nil {
 		d.Sources = slices.Clone(DefaultSources)
 	}
@@ -546,7 +554,8 @@ func (v *validator) repoOptions(at []any, o *RepoOptions, def *RepoOptions) {
 		if o.Instructions == nil {
 			o.Instructions = def.Instructions
 		}
-		// packages are per repo and never inherited: they name what one repo publishes.
+		// packages and skip_through are per repo and never inherited:
+		// they name what one repo publishes and where its history starts.
 	}
 	if at == nil {
 		return // an env-only repo: everything came from the validated defaults
@@ -595,6 +604,13 @@ func (v *validator) repoOptions(at []any, o *RepoOptions, def *RepoOptions) {
 			v.err(append(at, "packages", i, "name"), "is required")
 		}
 	}
+}
+
+func regexOf(r *Regex) *regexp.Regexp {
+	if r == nil {
+		return nil
+	}
+	return r.Re
 }
 
 // Options returns the effective options of the repo named name (owner/repo,

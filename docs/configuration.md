@@ -101,12 +101,19 @@ repos:
     tag_pattern: '^go1\.\d+(\.\d+)?$'      # skip weekly and rc tags
   - repo: hashicorp/terraform
     include_prereleases: true
+    # skip_through: v1.14.0          # per repo only; skip this version and earlier in its stream
   - repo: astral-sh/uv
     changelog: CHANGELOG.md
     packages:                              # advisory matching when names differ
       - { ecosystem: pip, name: uv }
     instructions: Lead with lockfile and resolver changes; I use uv in CI.
 ```
+
+`skip_through` is an optional version, accepted only in `repos:` entries, not
+`defaults:`. Like `packages`, it describes one repository rather than a shared
+default. It uses the [version parser](versions.md) and the repo's
+`prerelease_pattern`; an unparseable value is a configuration error.
+Omit `skip_through` to disable it. An empty string written directly is rejected; an empty value that arrives through a YAML merge key is accepted and disables it, the same as omitting it.
 
 Durations are Go durations (`90m`, `1h30m`) or a whole number of days (`7d`).
 
@@ -120,7 +127,7 @@ Some values are derived rather than configured:
 Where each setting is used:
 
 - `schedule.*`: [Architecture](architecture.md)
-- `github.*`, `sources`, `backfill`, `max_pages`, the patterns:
+- `github.*`, `sources`, `backfill`, `max_pages`, `skip_through`, the patterns:
   [Polling GitHub](polling.md), [Versions](versions.md)
 - `changelog`, `llm.max_input_chars`: [Release notes](notes.md)
 - `llm.*`, `instructions`: [Summaries](summaries.md)

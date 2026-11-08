@@ -144,13 +144,13 @@ func (o *Outbox) deliver(ctx context.Context, n *store.Notification) error {
 		if cur.Payload != n.Payload {
 			o.Log.Info("alert rebuilt while it was being sent; the earlier version went out", "repo", n.Repo, "tag", n.Tag)
 		}
-		return o.finish(rec, n, serr, "")
+		return o.finish(rec, cur, serr, "")
 	}
 	var se *SendError
 	if errors.As(serr, &se) && se.Ambiguous {
 		o.Log.Warn("alert delivery may have succeeded; a retry can deliver it twice", "repo", n.Repo, "tag", n.Tag, "err", serr)
 	}
-	return o.finish(rec, n, serr, serr.Error())
+	return o.finish(rec, cur, serr, serr.Error())
 }
 
 // finish records a claim's outcome: sent if failure is "" and sendErr is
@@ -162,7 +162,7 @@ func (o *Outbox) finish(ctx context.Context, n *store.Notification, sendErr erro
 	var state string
 	var cancelled bool
 	err := o.Store.Tx(ctx, func(tx *store.Tx) (err error) {
-		state, cancelled, err = tx.Finish(ctx, n.GUID, sent, next, failure, now)
+		state, cancelled, err = tx.Finish(ctx, n.GUID, n.Reason, sent, next, failure, now)
 		return err
 	})
 	if err != nil {

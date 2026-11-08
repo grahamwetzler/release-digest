@@ -80,6 +80,7 @@ notify:                              # alerts are off without an ntfy URL
   ntfy:
     url: https://ntfy.example.com/release-alerts   # or the ntfy_url secret
   min_severity: high                 # critical | high | medium
+  crosscheck: false                  # opt in to unconfirmed keyword alerts (priority 3)
   max_age: 7d
   include_backfill: false
   include_prereleases: false
@@ -126,6 +127,12 @@ Where each setting is used:
 - `llm.*`, `instructions`: [Summaries](summaries.md)
 - `notify.*`, `packages`: [Security alerts](security-alerts.md)
 - `feed.*`: [The feed](feed.md)
+
+`notify.crosscheck` is off by default. When enabled, it sends an unconfirmed
+alert if release notes contain security IDs or vulnerability phrases but the
+LLM lists no security fixes and reports urgency `none`, and no advisory fires.
+This keyword check can false-positive on notes that merely mention security;
+it does not change feed urgency. Mismatches are logged even when it is off.
 
 ## Checking a config
 

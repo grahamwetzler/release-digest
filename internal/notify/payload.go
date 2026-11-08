@@ -103,6 +103,21 @@ func BuildPayload(r *store.Release, sum *summarize.Summary, d Decision) Payload 
 	return p
 }
 
+// UnconfirmedPayload reports a mismatch without claiming the release is urgent.
+func UnconfirmedPayload(r *store.Release, signals []string) Payload {
+	parts := []string{"Release notes contain security signals omitted by the summary. These are unconfirmed keyword matches."}
+	for _, signal := range signals {
+		parts = append(parts, "- "+signal)
+	}
+	return Payload{
+		Title:    "Unconfirmed security signal: " + r.Repo + " " + r.Tag,
+		Priority: 3,
+		Tags:     []string{"warning", r.Repo},
+		Click:    r.HTMLURL,
+		Body:     assemble(parts, BodyBudget),
+	}
+}
+
 // assemble joins parts with blank lines until the budget runs out: the
 // first part that doesn't fit is truncated to what's left, and the rest
 // are dropped.

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,10 +16,54 @@ import (
 
 	"release-digest/internal/github/githubtest"
 	"release-digest/internal/ident"
+	"release-digest/internal/llm/llmtest"
+	"release-digest/internal/notify"
 	"release-digest/internal/store"
 )
 
 const testGHSA = "GHSA-2345-6789-cfgh"
+
+func TestNotifyReleaseCrosscheck(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			cleanEnv(t)
+			gh := githubtest.New()
+			defer gh.Close()
+			nt := newNtfyServer(t)
+			gh.Repo("o/r").Releases = []githubtest.Release{
+				{Tag: "v1.1.0", Body: "Security: Fix RCE and path traversal", Published: time.Now().Add(-time.Hour)},
+				{Tag: "v1.0.0", Body: "First release", Published: time.Now().Add(-48 * time.Hour)},
+			}
+			ai := llmtest.New(`{"headline":"Parser changes","breaking":[],"features":[],"fixes":["Parser changes"],"security":[],"noise_only":false,"security_urgency":"none","security_reason":""}`)
+			defer ai.Close()
+			cfg := writeConfig(t, fmt.Sprintf("github: {api_url: %s}\nllm: {base_url: %s, model: test/model}\nnotify: {crosscheck: %v}\nrepos: [{repo: o/r}]\n", gh.URL, ai.URL(), enabled))
+			t.Setenv("NTFY_URL", nt.URL+"/alerts")
+			var out, errb bytes.Buffer
+			if code := run([]string{"notify", "test", "--config", cfg, "--release", "o/r@v1.1.0"}, &out, &errb); code != 0 {
+				t.Fatalf("notify test --release: exit %d\n%s", code, errb.String())
+			}
+			want := "o/r@v1.1.0 (previous: v1.0.0), notes: release_body\n" +
+				"advisory signal: no GHSA or CVE IDs in the notes\n" +
+				"LLM signal: none (none)\ndecision: none\n"
+			if enabled {
+				row := &store.Release{Repo: "o/r", Tag: "v1.1.0", HTMLURL: "https://github.com/o/r/releases/tag/v1.1.0"}
+				payload := notify.UnconfirmedPayload(row, []string{"remote code execution", "path traversal"})
+				b, err := json.MarshalIndent(payload, "", "  ")
+				if err != nil {
+					t.Fatal(err)
+				}
+				want += "unconfirmed security signals: remote code execution, path traversal\n" +
+					"crosscheck payload (not sent):\n" + string(b) + "\n"
+			}
+			if out.String() != want {
+				t.Errorf("output =\n%s\nwant:\n%s", out.String(), want)
+			}
+			if nt.count() != 0 {
+				t.Fatal("dry run sent an alert")
+			}
+		})
+	}
+}
 
 // ntfyServer records the alerts it receives.
 type ntfyServer struct {

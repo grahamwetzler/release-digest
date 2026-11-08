@@ -218,6 +218,11 @@ func detect(ctx context.Context, cfg *config.Config, loaded []secret.Loaded, tar
 		fmt.Fprintf(stdout, " (%s)", d.Source)
 	}
 	fmt.Fprintln(stdout)
+	if cfg.Notify.Crosscheck && len(d.Unconfirmed) > 0 {
+		fmt.Fprintf(stdout, "unconfirmed security signals: %s\n", strings.Join(d.Unconfirmed, ", "))
+		out, _ := json.MarshalIndent(notify.UnconfirmedPayload(row, d.Unconfirmed), "", "  ")
+		fmt.Fprintf(stdout, "crosscheck payload (not sent):\n%s\n", out)
+	}
 	if d.Urgency != store.UrgencyUrgent {
 		return 0
 	}

@@ -9,6 +9,7 @@ import (
 
 	"release-digest/internal/advisory"
 	"release-digest/internal/config"
+	"release-digest/internal/secsignal"
 	"release-digest/internal/store"
 	"release-digest/internal/summarize"
 )
@@ -46,6 +47,9 @@ type Decision struct {
 	// Downgraded is set when the LLM said urgent but the summary lists no
 	// security change or the notes have no security keyword (docs/security-alerts.md).
 	Downgraded bool
+
+	// Unconfirmed lists security signals in the notes that the summary omitted.
+	Unconfirmed []string
 }
 
 // Firing returns the links that make the release urgent, highest severity first.
@@ -141,6 +145,9 @@ func Decide(in Inputs) Decision {
 	}
 
 	firing := d.Firing()
+	if len(firing) == 0 && in.Summary != nil && len(in.Summary.Security) == 0 && d.LLM == summarize.UrgencyNone {
+		d.Unconfirmed = secsignal.Scan(in.Notes)
+	}
 	switch {
 	case len(firing) > 0:
 		d.Urgency, d.Source = store.UrgencyUrgent, "advisory:"+firing[0].ID

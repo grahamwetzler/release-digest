@@ -206,6 +206,10 @@ func (a *Alerter) Recompute(ctx context.Context, repo, tag string) error {
 			a.Log.Debug("advisory doesn't fire", "repo", repo, "tag", tag, "advisory", l.ID, "why", l.Note)
 		}
 	}
+	if len(d.Unconfirmed) > 0 {
+		a.Log.Warn("unconfirmed security signals omitted by LLM summary",
+			"repo", repo, "tag", tag, "signals", d.Unconfirmed, "crosscheck", a.Cfg.Notify.Crosscheck)
+	}
 	if d.Downgraded {
 		a.Log.Info("LLM urgent downgraded to advisory: no security change listed or no security keyword in the notes",
 			"repo", repo, "tag", tag)
@@ -245,10 +249,11 @@ func (a *Alerter) inputs(ctx context.Context, tx *store.Tx, r *store.Release) (I
 	return in, err
 }
 
-// outbox applies a decision to the release's alert. An urgent release
-// that may alert is enqueued once, or has its unsent alert rebuilt; any
-// other release has its unsent alert cancelled. It reports whether an
-// alert is now queued.
+// outbox applies a decision to the release's alert. An urgent or opted-in unconfirmed release
+// that may alert is enqueued or rebuilt, including sent cross-checks becoming
+// urgent. Cross-checks leave existing urgent alerts alone; otherwise a release
+// that no longer qualifies has its unsent alert cancelled. It reports whether
+// an alert is now queued or sending.
 func (a *Alerter) outbox(ctx context.Context, tx *store.Tx, r *store.Release, sum *summarize.Summary, d Decision, now time.Time) (bool, error) {
 	n, err := tx.Notification(ctx, r.GUID)
 	if err != nil {
@@ -258,34 +263,62 @@ func (a *Alerter) outbox(ctx context.Context, tx *store.Tx, r *store.Release, su
 	if err != nil {
 		return false, err
 	}
-	if d.Urgency != store.UrgencyUrgent || !eligible {
+	alert := d.Urgency == store.UrgencyUrgent || (a.Cfg.Notify.Crosscheck && len(d.Unconfirmed) > 0)
+	if !alert || !eligible {
 		if n != nil && (n.State == store.AlertQueued || n.State == store.AlertSending) {
 			// Past the window, a queued alert expires loudly rather than
 			// being cancelled.
-			if d.Urgency == store.UrgencyUrgent && why == whyTooOld {
+			if alert && why == whyTooOld {
 				return false, nil
 			}
 			a.Log.Info("alert cancelled", "repo", r.Repo, "tag", r.Tag, "urgency", d.Urgency, "why", why)
 			return false, tx.Cancel(ctx, r.GUID)
 		}
-		if d.Urgency == store.UrgencyUrgent && n == nil {
-			a.Log.Info("urgent release not alerted", "repo", r.Repo, "tag", r.Tag, "why", why)
+		if alert && n == nil {
+			message := "crosscheck not alerted"
+			if d.Urgency == store.UrgencyUrgent {
+				message = "urgent release not alerted"
+			}
+			a.Log.Info(message, "repo", r.Repo, "tag", r.Tag, "why", why)
 		}
 		return false, nil
 	}
-	p := BuildPayload(r, sum, d).Encode()
+	if n != nil && n.Reason != "crosscheck" && d.Urgency != store.UrgencyUrgent && a.Cfg.Notify.Crosscheck && len(d.Unconfirmed) > 0 {
+		// The release is no longer urgent but its notes still carry security
+		// signals. A queued urgent alert would deliver a stale urgent
+		// payload, so it falls through and is rebuilt as the cross-check
+		// alert below. Any other urgent alert is left alone: a sending one
+		// is already being posted as urgent, and rebuilding it would lose
+		// the record that its delivery was urgent; a sent, cancelled or
+		// expired one must never be resent by a cross-check.
+		if n.State != store.AlertQueued {
+			return false, nil
+		}
+	}
+	payload := BuildPayload(r, sum, d)
+	reason := d.Source
+	if d.Urgency != store.UrgencyUrgent {
+		payload = UnconfirmedPayload(r, d.Unconfirmed)
+		reason = "crosscheck"
+	}
+	p := payload.Encode()
 	expires := r.Published.Add(a.Cfg.Notify.MaxAge.D)
 	if n == nil {
-		a.Log.Info("alert enqueued", "repo", r.Repo, "tag", r.Tag, "reason", d.Source)
+		a.Log.Info("alert enqueued", "repo", r.Repo, "tag", r.Tag, "reason", reason)
 		return tx.Enqueue(ctx, &store.Notification{GUID: r.GUID, Repo: r.Repo, Tag: r.Tag, Channel: "ntfy",
-			Reason: d.Source, Payload: p, Created: now, Expires: expires})
+			Reason: reason, Payload: p, Created: now, Expires: expires})
 	}
-	if n.Payload == p && n.Reason == d.Source && n.Expires.Equal(expires) && n.State != store.AlertCancelled && !n.CancelRequested {
+	if n.Payload == p && n.Reason == reason && n.Expires.Equal(expires) && n.State != store.AlertCancelled && !n.CancelRequested {
 		return false, nil
 	}
-	ok, err := tx.Rebuild(ctx, r.GUID, d.Source, p, expires, now)
+	var ok bool
+	if n.Reason == "crosscheck" && d.Urgency == store.UrgencyUrgent {
+		ok, err = tx.EscalateCrosscheck(ctx, r.GUID, reason, p, expires, now)
+	} else {
+		ok, err = tx.Rebuild(ctx, r.GUID, reason, p, expires, now)
+	}
 	if ok {
-		a.Log.Info("alert rebuilt", "repo", r.Repo, "tag", r.Tag, "reason", d.Source, "was", n.State)
+		a.Log.Info("alert rebuilt", "repo", r.Repo, "tag", r.Tag, "reason", reason, "was", n.State)
 	}
 	return ok, err
 }
@@ -345,10 +378,11 @@ func Fingerprint(c *config.Config, enabled bool) string {
 		MaxAge             time.Duration   `json:"max_age"`
 		IncludeBackfill    bool            `json:"include_backfill"`
 		IncludePrereleases bool            `json:"include_prereleases"`
+		Crosscheck         bool            `json:"crosscheck,omitempty"`
 		Enabled            bool            `json:"enabled"`
 		Repos              map[string]repo `json:"repos"`
 		Defaults           repo            `json:"defaults"`
-	}{c.Notify.MinSeverity, c.Notify.MaxAge.D, c.Notify.IncludeBackfill, c.Notify.IncludePrereleases, enabled,
+	}{c.Notify.MinSeverity, c.Notify.MaxAge.D, c.Notify.IncludeBackfill, c.Notify.IncludePrereleases, c.Notify.Crosscheck, enabled,
 		map[string]repo{}, repo{c.Defaults.Packages, pattern(c.Defaults.PrereleasePattern)}}
 	for _, r := range c.Repos {
 		doc.Repos[r.Name()] = repo{r.Packages, pattern(r.PrereleasePattern)}

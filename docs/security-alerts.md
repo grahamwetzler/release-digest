@@ -93,6 +93,48 @@ immediately". Ordinary hardening and dependency CVE bumps are `advisory`.
 notes contain a security keyword (`security`, `vulnerab`, `CVE-`, `GHSA-`,
 `exploit`). Otherwise it's downgraded to `advisory` and logged.
 
+### Deterministic cross-check
+
+When no advisory link fires, a summary exists, its `security` list is empty,
+and its urgency is `none`, a deterministic scanner checks the resolved notes.
+It recognizes whole CVE and GHSA IDs and vulnerability phrases, including
+security fixes, advisories and issues, remote code execution (RCE), privilege
+escalation, cross-site scripting (XSS), SQL injection, path or directory
+traversal, server-side request forgery (SSRF), and authentication or auth bypass.
+Matching is case-insensitive, with Unicode letter/digit boundaries and flexible
+whitespace. Results are canonicalized, deduplicated, and kept in mention order.
+The scanner does not consult the LLM, so instructions in the notes cannot
+persuade it to suppress a match.
+
+These signals are **unconfirmed**: this is a keyword check, so it can
+false-positive on notes that merely mention security, an unrelated issue, or
+an unfixed vulnerability. It does not establish severity or that this release
+fixes anything. It never changes urgency, its source, priority, or the existing
+LLM downgrade rules; the feed marking stays the same. Each mismatch is logged
+as a structured warning with `repo`, `tag`, `signals`, and `crosscheck`, even
+when cross-check alerts are disabled.
+
+`notify.crosscheck: true` opts in to ntfy messages for these mismatches. It is
+**off by default** and still requires an ntfy URL. The title is
+`Unconfirmed security signal: {owner/repo} {tag}`, priority is `3` (below urgent
+alerts), and the plain body lists the canonical signals within the existing
+body budget. The normal eligibility, visibility checks, retries, expiry,
+and cancellation rules apply. Changing this option triggers recomputation at
+startup, including cancellation of queued cross-check alerts when disabled.
+
+Unconfirmed and urgent alerts share the existing outbox row keyed by release
+GUID. Repeated recomputation queues no duplicate, and an unsent payload can be
+rebuilt when the signals change. If an unconfirmed release becomes urgent,
+the row is rebuilt into an urgent alert even if the unconfirmed alert was
+already sent. If an urgent release is later de-escalated while its notes
+still carry signals, a queued urgent alert is rebuilt as the priority-3
+cross-check alert, so it neither delivers the stale urgent payload nor goes
+silent. A sending urgent alert is left alone, since it is already being
+posted and its completion must record an urgent delivery. A sent, cancelled
+or expired urgent alert is left alone too; a cross-check never re-sends a
+release. Further urgent decisions follow normal
+deduplication.
+
 ## Urgency on the item
 
 A release's `urgency` and its source are stored apart from its summary state.
@@ -127,7 +169,9 @@ scheduler tick.
 - **Timing.** The worker wakes every 30s, or immediately when a row is
   enqueued, and sends at most 10 per wake, each with a 10s timeout.
 - **Once per release.** Rows are keyed by GUID, so `resummarize`, restarts
-  and state transitions never enqueue twice.
+  and state transitions deduplicate alerts. Escalation from an unconfirmed
+  cross-check to urgent reuses the row and permits one urgent delivery,
+  even after the unconfirmed alert was sent.
 - **Claiming.** The worker moves a row from `queued` to `sending` in its own
   transaction. It skips rows whose release is dirty, has notes not yet scanned
   for advisory IDs, or is confirmed deleted, and rows whose repo is held. It
@@ -145,14 +189,21 @@ scheduler tick.
   | POST returns 2xx | → `sent` | → `sent`; the race was lost, and it's logged |
   | POST fails or is ambiguous | → `queued` with backoff | → `cancelled`, no retry; an ambiguous POST may have been delivered, and that's logged |
 
-- **De-escalation cancels unsent alerts.** A `queued` row becomes
+- **De-escalation cancels unsent alerts** unless an enabled unconfirmed
+  cross-check still qualifies the release; then a queued urgent alert is
+  rebuilt as the cross-check alert, and a sending or terminal one is left
+  unchanged. A
+  `queued` row becomes
   `cancelled`; a `sending` row gets `cancel_requested`, and the table above
   decides.
 - **Re-escalation** within `max_age` rebuilds the row's reason, payload and
   priority from the current signals. A `cancelled` row returns to `queued`; a
   `sending` row has its cancel request cleared. A re-queued alert never
-  carries a withdrawn advisory's text. A `sent` row is never touched: no
-  retraction and no second send.
+  carries a withdrawn advisory's text. A `sent` urgent row is never touched.
+  An unconfirmed cross-check in any state can become urgent, with fresh retry
+  bookkeeping. If its POST is already in flight, completing that cross-check
+  leaves the urgent alert queued; if escalation precedes the POST, only the
+  urgent payload is delivered.
 - **Crash safety.** A row left in `sending` goes back to `queued` at startup,
   or to `cancelled` if a cancel was requested.
 

@@ -257,3 +257,28 @@ repos:
 		t.Errorf("exactly the limit: %v", err)
 	}
 }
+
+func TestNotifyCrosscheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{"default", "", false},
+		{"enabled", "notify:\n  crosscheck: true\n", true},
+		{"disabled", "notify:\n  crosscheck: false\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(write(t, minimal+tc.yaml), envOf(nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Notify.Crosscheck != tc.want {
+				t.Errorf("crosscheck = %v, want %v", c.Notify.Crosscheck, tc.want)
+			}
+		})
+	}
+	if _, err := Load(write(t, minimal+"notify:\n  crosscheck: sometimes\n"), envOf(nil)); err == nil {
+		t.Fatal("non-boolean crosscheck accepted")
+	}
+}

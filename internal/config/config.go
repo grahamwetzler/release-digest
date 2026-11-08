@@ -66,6 +66,7 @@ type Notify struct {
 	Ntfy               *Ntfy    `yaml:"ntfy"` // nil: alerts are off
 	MinSeverity        string   `yaml:"min_severity"`
 	MaxAge             Duration `yaml:"max_age"`
+	Crosscheck         bool     `yaml:"crosscheck"`
 	IncludeBackfill    bool     `yaml:"include_backfill"`
 	IncludePrereleases bool     `yaml:"include_prereleases"`
 }

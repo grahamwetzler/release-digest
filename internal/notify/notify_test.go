@@ -447,7 +447,7 @@ func TestDeescalationCancelsAndReescalationRequeues(t *testing.T) {
 	h.pass()
 	n := h.alert(r)
 	if n.State != store.AlertQueued || n.Reason != "advisory:"+other || !strings.Contains(n.Payload, `"priority":5`) ||
-		strings.Contains(n.Payload, ghsa+")") {
+		strings.Contains(n.Payload, strings.ReplaceAll(ghsa, "-", `\\-`)+")") {
 		t.Fatalf("re-escalated: %+v", n)
 	}
 	h.drain()
@@ -714,7 +714,7 @@ func TestPayloadBudget(t *testing.T) {
 	if len(p.Body) > BodyBudget || !utf8.ValidString(p.Body) || !strings.HasSuffix(p.Body, "…") {
 		t.Errorf("body is %d bytes, valid %v, ends %q", len(p.Body), utf8.ValidString(p.Body), p.Body[len(p.Body)-10:])
 	}
-	if !strings.HasPrefix(p.Body, "**Fixes remote code execution**\n\nSeverity: **critical** ("+ghsa+")") {
+	if !strings.HasPrefix(p.Body, "**Fixes remote code execution**\n\nSeverity: **critical** (GHSA\\-2345\\-6789\\-cfgh)") {
 		t.Errorf("body starts %q", p.Body[:80])
 	}
 	if strings.Contains(p.Body, strings.Repeat("é", 151)) {

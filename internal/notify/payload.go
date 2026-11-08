@@ -2,6 +2,7 @@ package notify
 
 import (
 	"encoding/json"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -14,7 +15,7 @@ import (
 // attachment, so the body stays well below.
 const (
 	BodyBudget  = 3500 // UTF-8 bytes
-	ReasonLimit = 300  // bytes of security_reason
+	ReasonLimit = 300  // bytes of escaped security_reason
 	MaxActions  = 2    // advisory buttons
 )
 
@@ -77,30 +78,63 @@ func BuildPayload(r *store.Release, sum *summarize.Summary, d Decision) Payload 
 	var parts []string
 	switch {
 	case sum != nil:
-		parts = append(parts, "**"+sum.Headline+"**")
+		parts = append(parts, "**"+truncate(escapeMarkdown(sum.Headline), BodyBudget-4)+"**")
 	case len(firing) > 0 && len(firing[0].Matching) > 0:
-		parts = append(parts, "**"+firing[0].Matching[0].Summary+"**")
+		parts = append(parts, "**"+truncate(escapeMarkdown(firing[0].Matching[0].Summary), BodyBudget-4)+"**")
 	}
 	for _, l := range firing {
-		parts = append(parts, "Severity: **"+l.Severity+"** ("+l.ID+")")
+		prefix, suffix := "Severity: **", "** ("+escapeMarkdown(l.ID)+")"
+		left := BodyBudget - len(strings.Join(parts, "\n\n"))
+		if len(parts) > 0 {
+			left -= len("\n\n")
+		}
+		contentBudget := left - len(prefix) - len(suffix)
+		severity := escapeMarkdown(l.Severity)
+		if len(severity) > contentBudget && contentBudget < len("…") {
+			p.Body = assemble(parts, BodyBudget)
+			return p
+		}
+		parts = append(parts, prefix+truncate(severity, contentBudget)+suffix)
 	}
 	if sum != nil {
 		if reason := sum.SecurityReason; reason != "" {
-			parts = append(parts, truncate(reason, ReasonLimit))
+			parts = append(parts, truncate(escapeMarkdown(reason), ReasonLimit))
 		}
 		for _, s := range sum.Security {
-			parts = append(parts, "- "+s)
+			parts = append(parts, "- "+escapeMarkdown(s))
 		}
 	}
 	for _, l := range firing {
 		for _, a := range l.Matching {
 			if a.Summary != "" {
-				parts = append(parts, a.ID()+": "+a.Summary)
+				parts = append(parts, escapeMarkdown(a.ID())+": "+escapeMarkdown(a.Summary))
 			}
 		}
 	}
 	p.Body = assemble(parts, BodyBudget)
 	return p
+}
+
+var httpScheme = regexp.MustCompile(`(?i)https?://`)
+
+// escapeMarkdown keeps a field on one line and renders its markup as text.
+// Defang URL schemes too: clients can linkify URLs after rendering Markdown.
+func escapeMarkdown(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = httpScheme.ReplaceAllStringFunc(s, func(s string) string {
+		if len(s) == len("https://") {
+			return "hxxps://"
+		}
+		return "hxxp://"
+	})
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune("\\`*_{}[]()<>#+-.!|~&", r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // assemble joins parts with blank lines until the budget runs out: the
@@ -136,13 +170,24 @@ func lastLine(s string) string {
 	return s
 }
 
-// truncate cuts s to at most n bytes at a rune boundary, ending in "…" if cut.
+// truncate cuts escaped Markdown to at most n bytes, ending in "…" if cut.
+// It preserves rune boundaries and complete backslash escapes.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+	if n < len("…") {
+		return ""
+	}
 	cut := n - len("…")
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	start := cut
+	for start > 0 && s[start-1] == '\\' {
+		start--
+	}
+	if (cut-start)%2 != 0 {
 		cut--
 	}
 	return s[:cut] + "…"

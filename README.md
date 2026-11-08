@@ -144,8 +144,9 @@ repos:
 `instructions` tell the LLM what matters to you in a repo's releases. Put a
 default for every repo under `defaults:`; a repo's own `instructions` replace
 it. They steer the headline and which changes the summary includes and puts
-first, never what it claims. Security fixes are always listed and rated as if
-there were no instructions, so they can't hide a fix or suppress an alert.
+first, never what it claims. The model is told to list and rate security fixes
+independently; delimiter-shaped text is escaped to reduce prompt confusion,
+but plain text can still persuade the model.
 Editing them applies to new releases; run
 `release-digest resummarize --repo owner/repo` to redo existing ones. Up to
 2000 characters.
